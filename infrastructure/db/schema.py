@@ -4,6 +4,7 @@ from dataclasses import asdict
 
 connection = db_connection.connection
 
+
 def create_sources():
     cursor = connection.cursor()
     q = ("CREATE TABLE IF NOT EXISTS sources ("
@@ -18,6 +19,7 @@ def create_sources():
     cursor.execute(q)
     connection.commit()
 
+
 def add_source(name, type_, base_url, enabled=True):
     cursor = connection.cursor()
     q = """
@@ -27,6 +29,7 @@ def add_source(name, type_, base_url, enabled=True):
     """
     cursor.execute(q, (name, type_, base_url, enabled))
     connection.commit()
+
 
 def add_sources():
     cursor = connection.cursor()
@@ -42,15 +45,18 @@ def add_sources():
     cursor.execute(q)
     connection.commit()
 
+
 def drop_sources():
     cursor = connection.cursor()
     cursor.execute("DROP TABLE IF EXISTS  sources")
     connection.commit()
 
+
 def truncate_sources():
     cursor = connection.cursor()
     cursor.execute("TRUNCATE TABLE IF EXISTS sources")
     connection.commit()
+
 
 def create_articles():
     cursor = connection.cursor()
@@ -70,6 +76,7 @@ def create_articles():
          )
     cursor.execute(q)
     connection.commit()
+
 
 def resolve_source_id(domain: str) -> int:
     """
@@ -92,6 +99,7 @@ def resolve_source_id(domain: str) -> int:
         new_id = cur.fetchone()[0]
     connection.commit()
     return new_id
+
 
 def upsert_article(article):
     UPSERT_ARTICLE_SQL = """
@@ -126,6 +134,7 @@ def upsert_article(article):
     connection.commit()
     return article_id
 
+
 def add_article(source_id, title, url, summary, published_at, content, sentiment):
     cursor = connection.cursor()
     q = """
@@ -136,15 +145,18 @@ def add_article(source_id, title, url, summary, published_at, content, sentiment
     cursor.execute(q, (source_id, title, url, summary, published_at, content, sentiment))
     connection.commit()
 
+
 def drop_articles():
     cursor = connection.cursor()
     cursor.execute("DROP TABLE IF EXISTS articles")
     connection.commit()
 
+
 def truncate_articles():
     cursor = connection.cursor()
     cursor.execute("TRUNCATE TABLE IF EXISTS articles")
     connection.commit()
+
 
 def create_prices():
     cursor = connection.cursor()
@@ -162,6 +174,7 @@ def create_prices():
     cursor.execute(q)
     connection.commit()
 
+
 def add_price(source_id, symbol, price, currency='USD'):
     cursor = connection.cursor()
     q = """
@@ -171,12 +184,26 @@ def add_price(source_id, symbol, price, currency='USD'):
     cursor.execute(q, (source_id, symbol, price, currency))
     connection.commit()
 
+
 def drop_prices():
     cursor = connection.cursor()
     cursor.execute("DROP TABLE IF EXISTS prices")
     connection.commit()
 
+
 def truncate_prices():
     cursor = connection.cursor()
     cursor.execute("TRUNCATE TABLE IF EXISTS prices")
+    connection.commit()
+
+
+def create_scrape_state():
+    cursor = connection.cursor()
+    q = ("CREATE TABLE scrape_state ("
+         "id SERIAL PRIMARY KEY,"
+         "last_scrape TIMESTAMP WITH TIME ZONE,"
+         "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),"
+         "updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW());"
+         )
+    cursor.execute(q)
     connection.commit()

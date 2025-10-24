@@ -4,11 +4,19 @@ from datetime import datetime
 from core.contracts import SiteAdapter, Article
 from infrastructure.db.schema import resolve_source_id
 
-from    infrastructure.utils.url_helpers import (
+from infrastructure.utils.url_helpers import (
     is_article_url,
     canonical_from_html,
     stable_hash
 )
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/118.0.0.0 Safari/537.36"
+    )
+}
 
 class ExampleNewsAdapter(SiteAdapter):
     DOMAIN = "ghostfrog.co.uk"
@@ -19,7 +27,7 @@ class ExampleNewsAdapter(SiteAdapter):
 
     def fetch_listing_urls(self):
         # ... fetch and parse the page
-        html = requests.get(self.LISTING, timeout=15).text
+        html = requests.get(self.LISTING, timeout=15, headers=HEADERS).text
         soup = BeautifulSoup(html, "lxml")
         for a in soup.select("a"):
             href = a.get("href", "")

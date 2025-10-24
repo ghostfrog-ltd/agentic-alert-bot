@@ -1,0 +1,1 @@
+from .adapters import example_news

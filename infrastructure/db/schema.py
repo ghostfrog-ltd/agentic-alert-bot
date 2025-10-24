@@ -78,53 +78,113 @@ def create_articles():
     connection.commit()
 
 
-def resolve_source_id(domain: str) -> int:
+def resolve_source_id(domain_or_name: str) -> int:
     """
-    Returns the ID of a source by its domain.
-    If it doesn't exist, insert it and return the new ID.
+    Accepts either 'coindesk.com', 'https://www.coindesk.com', or 'coindesk'.
+    Tries name first, then base_url (domain match). Inserts if missing.
     """
     with connection.cursor() as cur:
-        # 1. Check if source already exists
-        cur.execute("SELECT id FROM sources WHERE base_url = %s", (domain,))
+        # Try exact name
+        cur.execute("SELECT id FROM sources WHERE name = %s", (domain_or_name,))
         row = cur.fetchone()
         if row:
             return row[0]
 
-        # 2. Insert a new one if not found
+        # Try matching base_url by domain (works for https://www.coindesk.com etc.)
         cur.execute("""
-            INSERT INTO sources (name, base_url, enabled, created_at_utc, updated_at_utc)
-            VALUES (%s, %s, true, NOW(), NOW())
+            SELECT id FROM sources
+            WHERE replace(replace(replace(base_url,'https://',''),'http://',''),'www.','') ILIKE
+                  replace(replace(replace(%s,'https://',''),'http://',''),'www.','')
+            LIMIT 1
+        """, (domain_or_name,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+        # Insert minimal record (name + base_url both set to input)
+        cur.execute("""
+            INSERT INTO sources (name, type, base_url, enabled, created_at_utc, updated_at_utc)
+            VALUES (%s, 'news', %s, TRUE, NOW(), NOW())
             RETURNING id
-        """, (domain, domain))
+        """, (domain_or_name, domain_or_name))
         new_id = cur.fetchone()[0]
+
     connection.commit()
     return new_id
+
+
+def find_by_url(url: str):
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT id, source_id, title, url, summary, published_at,
+                   fetched_at, content, sentiment, created_at_utc, updated_at_utc
+            FROM articles
+            WHERE url = %s
+            LIMIT 1
+        """, (url,))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    keys = ["id", "source_id", "title", "url", "summary", "published_at",
+            "fetched_at", "content", "sentiment", "created_at_utc", "updated_at_utc"]
+    return dict(zip(keys, row))
+
+
+def update_content(url: str, content: str, title=None, summary=None, published_at=None):
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE articles
+            SET
+              title = COALESCE(%s, title),
+              summary = COALESCE(%s, summary),
+              published_at = COALESCE(%s, published_at),
+              content = %s,
+              updated_at_utc = NOW()
+            WHERE url = %s
+        """, (title, summary, published_at, content, url))
+    connection.commit()
+
+
+def article_exists_by_url(url: str) -> bool:
+    with connection.cursor() as cur:
+        cur.execute("SELECT 1 FROM articles WHERE url = %s LIMIT 1", (url,))
+        return cur.fetchone() is not None
+
+
+def touch_updated_at(url: str, ts=None):
+    with connection.cursor() as cur:
+        if ts is None:
+            cur.execute("UPDATE articles SET updated_at_utc = NOW() WHERE url = %s", (url,))
+        else:
+            cur.execute("UPDATE articles SET updated_at_utc = %s WHERE url = %s", (ts, url))
+    connection.commit()
 
 
 def upsert_article(article):
     UPSERT_ARTICLE_SQL = """
     INSERT INTO articles (
         source_id, title, url, summary, published_at,
-        fetched_at,            -- keep column, but use DEFAULT
-        content, sentiment,    -- keep columns, but use DEFAULT
+        fetched_at,
+        content, sentiment,
         created_at_utc, updated_at_utc
     )
     VALUES (
         %(source_id)s, %(title)s, %(url)s, %(summary)s, %(published_at)s,
-        DEFAULT,               -- fetched_at -> table default CURRENT_TIMESTAMP
-        DEFAULT,               -- content    -> NULL by default
-        DEFAULT,               -- sentiment  -> NULL by default
+        NOW(),
+        %(content)s, %(sentiment)s,
         NOW(), NOW()
     )
     ON CONFLICT (url) DO UPDATE SET
-        source_id       = EXCLUDED.source_id,
-        title           = COALESCE(EXCLUDED.title,        articles.title),
-        summary         = COALESCE(EXCLUDED.summary,      articles.summary),
-        published_at    = COALESCE(EXCLUDED.published_at, articles.published_at),
-        fetched_at      = NOW(),
-        content         = COALESCE(EXCLUDED.content,      articles.content),
-        sentiment       = COALESCE(EXCLUDED.sentiment,    articles.sentiment),
-        updated_at_utc  = NOW()
+        source_id      = EXCLUDED.source_id,
+        title          = COALESCE(EXCLUDED.title,        articles.title),
+        summary        = COALESCE(EXCLUDED.summary,      articles.summary),
+        published_at   = COALESCE(EXCLUDED.published_at, articles.published_at),
+        fetched_at     = NOW(),
+        content        = COALESCE(EXCLUDED.content,      articles.content),
+        sentiment      = COALESCE(EXCLUDED.sentiment,    articles.sentiment),
+        updated_at_utc = NOW()
     RETURNING id;
     """
     with connection.cursor() as cur:

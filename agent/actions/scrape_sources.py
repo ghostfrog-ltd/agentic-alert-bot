@@ -1,17 +1,36 @@
 from infrastructure.scraper.registry import AdapterRegistry
-from infrastructure.scraper.adapters import example_news
 from infrastructure.scraper.adapters import coindesk
 from infrastructure.db.schema import upsert_article
+from infrastructure.db import schema
+from infrastructure.utils.logger import get_logger
 
-registry = AdapterRegistry(adapters=[
-    example_news.ExampleNewsAdapter(),
-    coindesk.CoindeskAdapter()
-])
+logger = get_logger(__name__)
+
+registry = AdapterRegistry(
+    adapters=[
+        coindesk.CoindeskAdapter(),
+        # add more adapters here
+    ],
+    repo=schema,
+)
 
 def run():
-    for article in registry.crawl_all():
-        if(article.type == 'website'):
-            id = upsert_article(article)
-        else:
-            #  @todo: insert for a price.
-            x=1
+    """
+    Runs one scrape cycle and ALWAYS returns a list (never None).
+    Also keeps your 'website' type branch.
+    """
+    results = []
+    try:
+        for article in (registry.crawl_all() or []):
+            if getattr(article, "type", "website") == "website":
+                try:
+                    upsert_article(article)  # OK to keep if you want explicit control here
+                    logger.info(f"[scrape] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}")
+                except Exception as e:
+                    logger.warning(f"[scrape] Save failed {getattr(article,'url','')}: {e}")
+            else:
+                logger.debug(f"[scrape] Skipping non-website type: {getattr(article,'type','')}")
+            results.append(article)
+    except Exception as e:
+        logger.error(f"[scrape] run() failed: {e}")
+    return results

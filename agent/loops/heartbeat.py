@@ -12,7 +12,7 @@ def tick():
             run_scrape()
         except Exception as e:
             logger.error(f"[Heartbeat] scrape run failed: {e}")
-    else:
-        logger.info("[Heartbeat] Not time yet")
+    #else:
+        #logger.info("[Heartbeat] Not time yet")
 
     time.sleep(5)

@@ -1,15 +1,18 @@
 from infrastructure.scraper.registry import AdapterRegistry
-from infrastructure.scraper.adapters import coindesk
 from infrastructure.db.schema import upsert_article
 from infrastructure.db import schema
 from infrastructure.utils.logger import get_logger
+
+#crypto
+from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt
 
 logger = get_logger(__name__)
 
 registry = AdapterRegistry(
     adapters=[
-        coindesk.CoindeskAdapter(),
-        # add more adapters here
+        coindesk.Adapter(),
+        cointelegraph.Adapter(),
+        decrypt.Adapter(),
     ],
     repo=schema,
 )
@@ -22,7 +25,7 @@ def run():
     results = []
     try:
         for article in (registry.crawl_all() or []):
-            if getattr(article, "type", "website") == "website":
+            if getattr(article, "type", "website") in ("news", "website", "market"):
                 try:
                     upsert_article(article)  # OK to keep if you want explicit control here
                     logger.info(f"[scrape] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}")

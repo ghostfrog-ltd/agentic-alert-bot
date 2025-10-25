@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 
 from infrastructure.utils.http import get  # our HTTP helper
 from core.contracts import SiteAdapter, Article
-from infrastructure.db.schema import resolve_source_id
+from infrastructure.db.schema import resolve_source_id, resolve_source_niche, resolve_source_field
 from infrastructure.utils.text import extract_content, classify_sentiment, is_footer_only
 from infrastructure.utils.url_helpers import (
     is_article_url,
@@ -26,7 +26,7 @@ HEADERS = {
 }
 
 
-class CoindeskAdapter(SiteAdapter):
+class Adapter(SiteAdapter):
     DOMAIN = "coindesk.com"
     LISTING = "https://www.coindesk.com/"
     RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
@@ -52,6 +52,9 @@ class CoindeskAdapter(SiteAdapter):
             if not is_article_url(url, {self.DOMAIN}):
                 continue
             if url in seen:
+                continue
+            # Skip known junk paths (video pages, podcast, etc.)
+            if any(bad in url for bad in ("/videos/")):
                 continue
 
             seen.add(url)
@@ -121,10 +124,13 @@ class CoindeskAdapter(SiteAdapter):
         h = stable_hash(self.DOMAIN, canonical_url)
         source_id = resolve_source_id(self.DOMAIN)
 
+        niche = resolve_source_niche(self.DOMAIN)
+        website = resolve_source_field(self.DOMAIN, 'type')
+
         return Article(
             source_id=source_id,
             source=self.DOMAIN,
-            type="website",
+            type=website,
             url=canonical_url,
             title=title,
             summary=summary,
@@ -134,4 +140,5 @@ class CoindeskAdapter(SiteAdapter):
             hash_id=h,
             content=content,
             sentiment=sentiment,
+            niche=niche
         )

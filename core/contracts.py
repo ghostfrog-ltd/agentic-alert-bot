@@ -17,6 +17,7 @@ class Article:
     tags: list[str]
     content: str
     sentiment: str
+    niche: str
     raw_html: Optional[str] = None
     hash_id: Optional[str] = None
 

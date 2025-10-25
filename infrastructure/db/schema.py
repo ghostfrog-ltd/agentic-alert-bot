@@ -1,6 +1,7 @@
 import psycopg2
 from infrastructure.utils import db_connection
 from dataclasses import asdict
+from typing import Optional
 
 connection = db_connection.connection
 
@@ -112,7 +113,6 @@ def resolve_source_id(domain_or_name: str) -> int:
     connection.commit()
     return new_id
 
-
 def find_by_url(url: str):
     with connection.cursor() as cur:
         cur.execute("""
@@ -131,6 +131,14 @@ def find_by_url(url: str):
             "fetched_at", "content", "sentiment", "created_at_utc", "updated_at_utc"]
     return dict(zip(keys, row))
 
+def resolve_source_field(domain: str, field: str) -> Optional[str]:
+    with connection.cursor() as cur:
+        cur.execute(
+            f"SELECT {field} FROM sources WHERE base_url LIKE %s OR name = %s LIMIT 1",
+            (f'%{domain}%', domain),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def update_content(url: str, content: str, title=None, summary=None, published_at=None):
     with connection.cursor() as cur:
@@ -146,6 +154,11 @@ def update_content(url: str, content: str, title=None, summary=None, published_a
         """, (title, summary, published_at, content, url))
     connection.commit()
 
+def resolve_source_niche(domain: str) -> Optional[str]:
+    with connection.cursor() as cur:
+        cur.execute("SELECT niche FROM sources WHERE base_url LIKE %s OR name = %s LIMIT 1", (f'%{domain}%', domain))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def article_exists_by_url(url: str) -> bool:
     with connection.cursor() as cur:

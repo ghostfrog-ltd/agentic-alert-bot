@@ -6,11 +6,17 @@ from urllib.parse import urljoin, urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
+
 from core.contracts import AuctionAdapter
-from infrastructure.db.schema import (  upsert_auction_listing, resolve_source_id, resolve_source_field, )
+from infrastructure.db.schema import (
+    upsert_auction_listing,
+    resolve_source_id,
+    resolve_source_field,
+)
 from infrastructure.utils.logger import get_logger
-logger = get_logger(__name__)
 from infrastructure.utils.scrape_gate import gate_scrape, mark_scraped
+
+logger = get_logger(__name__)
 
 # ------------------------------------
 # CONFIG
@@ -64,10 +70,8 @@ def _resolve_source(domain_hint: str) -> tuple[str, int | None]:
                 logger.info(f"[{domain_hint}] sources resolved -> name='{_SOURCE_NAME}', id={_SOURCE_ID}")
                 return _SOURCE_NAME, _SOURCE_ID
         except Exception:
-            # keep trying other keys
             continue
 
-    # Fallback: DB requires a non-null source string
     _SOURCE_NAME, _SOURCE_ID = domain_hint, None
     logger.warning(f"[{domain_hint}] sources row not found; using source='{_SOURCE_NAME}' (no id)")
     return _SOURCE_NAME, _SOURCE_ID
@@ -261,6 +265,18 @@ def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | No
         return v
     return f"hash-{abs(hash(url))}"
 
+def _infer_sale_type(soup: BeautifulSoup, page_text: str) -> str | None:
+    t = page_text.lower()
+    # weak heuristics; good enough to categorize for analytics
+    if "best offer" in t:
+        return "best_offer"
+    if "buy it now" in t or "buy it now price" in t:
+        return "bin"
+    # if it shows bid/bids anywhere, treat as auction
+    if " bid" in t or " bids" in t:
+        return "auction"
+    return None
+
 # ------------------------------------
 # ADAPTER
 # ------------------------------------
@@ -300,12 +316,8 @@ class Adapter(AuctionAdapter):
             store_url = STORE_URL.format(seller=SELLER, page=page)
             try:
                 rs = _get(store_url, session, timeout=20, retries=2)
-                #logger.info(f"[{self.DOMAIN}] GET {store_url} -> {rs.status_code} {len(rs.text)} bytes (store)")
                 ss = BeautifulSoup(rs.text, "lxml")
                 urls_this = _extract_listing_urls_from_doc(ss, store_url)
-                if page == 1 and not urls_this:
-                    raw_itm = [a.get('href','') for a in ss.find_all('a') if '/itm/' in (a.get('href','') or '')]
-                    #logger.info(f"[{self.DOMAIN}] store p1 raw '/itm/' anchors={len(raw_itm)} sample={raw_itm[:5]}")
             except Exception as e:
                 logger.warning(f"[{self.DOMAIN}] store page failed p{page}: {e}")
 
@@ -333,8 +345,6 @@ class Adapter(AuctionAdapter):
                 except Exception as e:
                     logger.warning(f"[{self.DOMAIN}] desktop SRP failed p{page}: {e}")
 
-            #logger.info(f"[{self.DOMAIN}] page {page}: found {len(urls_this)} item URLs")
-
             if not urls_this:
                 consecutive_empty += 1
             else:
@@ -349,12 +359,10 @@ class Adapter(AuctionAdapter):
 
             page += 1
             if page > 20:
-                #logger.warning(f"[{self.DOMAIN}] pagination cap (20) reached; stopping.")
                 break
 
             time.sleep(random.uniform(1.5, 3.0))
-
-            mark_scraped(meta)
+            mark_scraped(meta)  # record progress so gate knows we ran
 
         return all_urls
 
@@ -381,7 +389,6 @@ class Adapter(AuctionAdapter):
 
             # Skip CF/interstitial pages (don't poison DB with that title)
             if title.lower().startswith("checking your browser"):
-                #logger.info(f"[{self.DOMAIN}] interstitial item page; skipping {url}")
                 return False
 
             # Price
@@ -406,10 +413,16 @@ class Adapter(AuctionAdapter):
             if len(url_clean) > 1024:
                 url_clean = url_clean[:1024]
 
+            # NEW: canonical detail URL (stable even after ending)
+            detail_url = _canonical_item_url(external_id)
+
+            # NEW: sale type hint (auction / bin / best_offer)
+            sale_type = _infer_sale_type(soup, html)
+
             # Resolve source (from sources table)
             source_name, source_id = _resolve_source(self.DOMAIN)
 
-            # Upsert
+            # Upsert (ensure your DB function accepts these extras & sets last_seen_at=NOW())
             upsert_auction_listing(
                 source=source_name,           # TEXT NOT NULL
                 external_id=external_id,
@@ -417,11 +430,13 @@ class Adapter(AuctionAdapter):
                 price_current=price_current,
                 bids_count=bids_count,
                 end_time=end_time,            # can be None
-                url=url_clean,
+                url=url_clean,                # list page (cleaned)
+                detail_url=detail_url,        # NEW: critical for final close/reconcile
+                sale_type=sale_type,          # NEW: category hint
                 roi_estimate=None,
                 max_bid=None,
                 notes=None,
-                source_id=source_id,          # optional
+                source_id=source_id,          # optional FK to sources.id
             )
 
             logger.info(

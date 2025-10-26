@@ -1,12 +1,86 @@
 import psycopg2
 from infrastructure.utils import db_connection
 from dataclasses import asdict
-from typing import Optional
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple, List
 
 connection = db_connection.connection
 
+# --- SELECTS
+
+def get_open_auctions(now: datetime) -> list[dict]:
+    sql = """
+    SELECT id, external_id, detail_url, end_time, status
+    FROM auction_listings
+    WHERE status IN ('OPEN','ENDING_SOON')
+    """
+    with connection.cursor() as cur:
+        cur.execute(sql)
+        rows = cur.fetchall()
+        cols = [c.name for c in cur.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+def get_open_auctions_ending_before(now: datetime) -> list[dict]:
+    sql = """
+    SELECT id, external_id, detail_url, end_time
+    FROM auction_listings
+    WHERE status IN ('OPEN','ENDING_SOON')
+      AND end_time IS NOT NULL
+      AND end_time <= %s
+    """
+    with connection.cursor() as cur:
+        cur.execute(sql, (now,))
+        rows = cur.fetchall()
+        cols = [c.name for c in cur.description]
+    return [dict(zip(cols, r)) for r in rows]
+
+def get_recent_max_price(auction_id: int, window_minutes: int = 10) -> Optional[float]:
+    sql = """
+    SELECT MAX(price) FROM price_history
+    WHERE auction_id = %s AND seen_at >= (NOW() AT TIME ZONE 'utc' - INTERVAL '%s minutes')
+    """
+    with connection.cursor() as cur:
+        cur.execute(sql, (auction_id, window_minutes))
+        (max_price,) = cur.fetchone()
+    return max_price
+
+# --- UPDATES
+
+def mark_status(auction_id: int, status: str):
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+               SET status = %s
+             WHERE id = %s
+        """, (status, auction_id))
+    connection.commit()
+
+def finalize_auction(
+    auction_id: int,
+    final_price: Optional[float],
+    final_price_confidence: Optional[str] = None,
+    status: str = 'ENDED_CONFIRMED',
+    sale_type: Optional[str] = None
+):
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+               SET status = %s,
+                   final_price = %s,
+                   final_price_confidence = %s,
+                   sale_type = COALESCE(%s, sale_type)
+             WHERE id = %s
+        """, (status, final_price, final_price_confidence, sale_type, auction_id))
+    connection.commit()
+
+def touch_last_seen(auction_id: int):
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+               SET last_seen_at = NOW() AT TIME ZONE 'utc'
+             WHERE id = %s
+        """, (auction_id,))
+    connection.commit()
 
 def create_sources():
     cursor = connection.cursor()
@@ -357,17 +431,19 @@ def create_auction_tables():
 
 
 def upsert_auction_listing(
-        source: str,  # <-- add this
+        source: str,                 # <-- keep
         external_id: str,
         title: str,
         price_current: int,
         bids_count: int,
         end_time,
         url: str,
+        detail_url: str | None = None,   # <-- NEW
+        sale_type: str | None = None,    # <-- NEW
         roi_estimate: float = None,
         max_bid: int = None,
         notes: str = None,
-        source_id: int | None = None  # <-- optional, since you also have source_id column
+        source_id: int | None = None
 ):
     conn = connection
     cur = conn.cursor()
@@ -375,11 +451,13 @@ def upsert_auction_listing(
         cur.execute("""
             INSERT INTO auction_listings (
                 source, external_id, title, price_current, bids_count, end_time,
-                url, fetched_at, roi_estimate, max_bid, notes, last_seen, source_id
+                url, detail_url, sale_type,
+                fetched_at, roi_estimate, max_bid, notes, last_seen, source_id
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s,
-                %s, CURRENT_TIMESTAMP, %s, %s, %s, CURRENT_TIMESTAMP, %s
+                %s, %s, %s,
+                CURRENT_TIMESTAMP, %s, %s, %s, CURRENT_TIMESTAMP, %s
             )
             ON CONFLICT (external_id) DO UPDATE
             SET
@@ -389,6 +467,9 @@ def upsert_auction_listing(
                 bids_count    = EXCLUDED.bids_count,
                 end_time      = EXCLUDED.end_time,
                 url           = EXCLUDED.url,
+                -- preserve existing non-null detail_url / sale_type if caller passes None
+                detail_url    = COALESCE(EXCLUDED.detail_url, auction_listings.detail_url),
+                sale_type     = COALESCE(EXCLUDED.sale_type,  auction_listings.sale_type),
                 fetched_at    = CURRENT_TIMESTAMP,
                 roi_estimate  = EXCLUDED.roi_estimate,
                 max_bid       = EXCLUDED.max_bid,
@@ -397,14 +478,15 @@ def upsert_auction_listing(
                 source_id     = EXCLUDED.source_id;
         """, (
             source, external_id, title, price_current, bids_count, end_time,
-            url, roi_estimate, max_bid, notes, source_id
+            url, detail_url, sale_type,
+            roi_estimate, max_bid, notes, source_id
         ))
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
-        cur.close()  # keep global connection open; don't conn.close()
+        cur.close()
 
 
 def insert_price_history(auction_id: int, price: int, bids_count: int):

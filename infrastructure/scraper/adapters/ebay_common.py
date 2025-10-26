@@ -18,6 +18,12 @@ from urllib3.util.retry import Retry
 from infrastructure.utils.http import sleep_rate, is_ended_listing  # your shared helpers
 from infrastructure.utils.logger import get_logger
 
+# --- Back-compat + tz-safe helpers (add to ebay_common.py) ---
+from datetime import datetime, timezone
+from bs4 import BeautifulSoup
+import re
+
+
 logger = get_logger(__name__)
 
 # ---------- constants / regex ----------
@@ -355,3 +361,57 @@ def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str
     if reason:
         msg += f" reason={reason}"
     logger.warning(msg)
+
+
+# If you already have ENDDATE_RX earlier in this file, reuse it; otherwise:
+ENDDATE_RX = re.compile(r'"endDate"\s*:\s*"([^"]+)"')
+
+def extract_end_time(soup: BeautifulSoup, html: str) -> datetime | None:
+    """
+    Return end_time as AWARE UTC (timestamptz-friendly).
+    Looks for <time datetime="..."> first, then JSON 'endDate' if present.
+    """
+    # 1) <time datetime="...">
+    t = soup.select_one("time[datetime]")
+    if t and t.has_attr("datetime"):
+        iso = (t["datetime"] or "").strip()
+        if iso:
+            try:
+                dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+                return dt.astimezone(timezone.utc)  # keep AWARE UTC
+            except Exception:
+                pass
+
+    # 2) JSON endDate pattern in page
+    m = ENDDATE_RX.search(html or "")
+    if m:
+        iso = m.group(1)
+        try:
+            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    return None
+
+def secs_left(end_time: datetime | None) -> int | None:
+    """
+    Robust difference in seconds: accepts naive or aware; normalizes to aware UTC.
+    Returns 0 if end_time is in the past.
+    """
+    if not end_time:
+        return None
+    if end_time.tzinfo is None:
+        end_aware = end_time.replace(tzinfo=timezone.utc)
+    else:
+        end_aware = end_time.astimezone(timezone.utc)
+    now_aware = datetime.now(timezone.utc)
+    delta_s = (end_aware - now_aware).total_seconds()
+    return int(delta_s) if delta_s > 0 else 0
+
+# Optional: make them explicit exports for clarity
+try:
+    __all__  # if defined elsewhere, extend it
+    __all__ += ["extract_end_time", "secs_left"]
+except NameError:
+    __all__ = ["extract_end_time", "secs_left"]

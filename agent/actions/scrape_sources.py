@@ -3,7 +3,7 @@ from infrastructure.scraper.auction_registry import AuctionRegistry
 from infrastructure.db.schema import upsert_article, resolve_source_field
 from infrastructure.utils.logger import get_logger
 from infrastructure.db import schema
-
+import traceback  # <-- add
 
 # News adapters
 from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt, bitcoinmagazine
@@ -51,21 +51,14 @@ def run_news():
                 continue
 
         for article in (news_registry.crawl_all() or []):
-            # Default fallback type = "website"
             if getattr(article, "type", "website") in ("news", "website", "market"):
                 try:
                     upsert_article(article)
-                    logger.info(
-                        f"[scrape-news] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}"
-                    )
+                    logger.info(f"[scrape-news] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}")
                 except Exception as e:
-                    logger.warning(
-                        f"[scrape-news] Save failed {getattr(article,'url','')}: {e}"
-                    )
+                    logger.warning(f"[scrape-news] Save failed {getattr(article,'url','')}: {e}")
             else:
-                logger.debug(
-                    f"[scrape-news] Skipping non-website type: {getattr(article,'type','')}"
-                )
+                logger.debug(f"[scrape-news] Skipping non-website type: {getattr(article,'type','')}")
             results.append(article)
     except Exception as e:
         logger.error(f"[scrape-news] run_news() failed: {e}")
@@ -80,17 +73,27 @@ def run_auctions():
                 logger.info(f"[scrape-auctions] Skipping disabled source: {adapter.DOMAIN}")
                 continue
 
-            urls = adapter.fetch_listing_urls()
+            # ⛑️ Guard fetch phase so tz bugs don't abort the whole cycle
+            try:
+                urls = adapter.fetch_listing_urls()
+            except Exception as e:
+                logger.warning(
+                    f"[scrape-auctions] {adapter.DOMAIN} fetch failed: {e}\n{traceback.format_exc()}"
+                )
+                continue
+
             logger.info(f"[scrape-auctions] {adapter.DOMAIN}: fetched {len(urls)} URLs")
+
             for url in urls:
                 try:
                     adapter.parse_auction(url)
                 except Exception as e:
                     logger.warning(
-                        f"[scrape-auctions] {adapter.DOMAIN} parse failed {url}: {e}"
+                        f"[scrape-auctions] {adapter.DOMAIN} parse failed {url}: {e}\n{traceback.format_exc()}"
                     )
     except Exception as e:
-        logger.error(f"[scrape-auctions] run_auctions() failed: {e}")
+        # This should basically never trigger now, but keep it as a belt-and-braces catch.
+        logger.error(f"[scrape-auctions] run_auctions() failed: {e}\n{traceback.format_exc()}")
 
 
 def run():
@@ -102,7 +105,5 @@ def run():
     """
     logger.info("[scrape] Starting full scrape cycle.")
     run_news()
-
     run_auctions()
     logger.info("[scrape] Scrape cycle complete..")
-

@@ -1,4 +1,8 @@
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urljoin
+
+from bs4 import BeautifulSoup
+
 from infrastructure.db.schema import (
     get_open_auctions,
     get_open_auctions_ending_before,
@@ -7,11 +11,7 @@ from infrastructure.db.schema import (
     get_recent_max_price,
 )
 from infrastructure.utils.logger import get_logger
-from infrastructure.utils.http import get  # your resilient HTTP helper
-from bs4 import BeautifulSoup
-from infrastructure.utils.http import get, head  # ← add head
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+from infrastructure.utils.http import get as http_get, head  # use our wrappers
 
 logger = get_logger(__name__)
 
@@ -20,21 +20,32 @@ BURST_WINDOW = timedelta(minutes=3)        # high-frequency polling window
 BURST_INTERVAL_SECONDS = 12                # how often you poll in the burst
 CLOSE_DELAY = timedelta(seconds=90)        # wait after end_time for snipes/page lag
 
+
+# --- time helpers (normalize to aware UTC) ---
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+def _to_aware_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _should_burst(now: datetime, end_time: datetime) -> bool:
+    end_time = _to_aware_utc(end_time) or end_time
     return (end_time - BURST_WINDOW) <= now <= (end_time + CLOSE_DELAY)
+
 
 def _mark_ending_soon_if_needed():
     now = _now_utc()
     for a in get_open_auctions(now):
-        end_time = a.get('end_time')
+        end_time = _to_aware_utc(a.get("end_time"))
         if not end_time:
             continue
-        if a['status'] != 'ENDING_SOON' and now >= (end_time - GRACE_WINDOW):
-            mark_status(a['id'], 'ENDING_SOON')
+        if a.get("status") != "ENDING_SOON" and now >= (end_time - GRACE_WINDOW):
+            mark_status(a["id"], "ENDING_SOON")
             logger.info(f"[close] Auction {a['id']} -> ENDING_SOON")
+
 
 def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | None]:
     """
@@ -45,7 +56,6 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
     try:
         hr = head(detail_url, allow_redirects=False, timeout=15)
     except Exception:
-        # fallback straight to GET on transient HEAD failures
         hr = None
 
     # If we got a redirect, follow once (usually to "this listing has ended")
@@ -53,10 +63,10 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
         loc = hr.headers["Location"]
         if loc.startswith("/"):
             loc = urljoin(detail_url, loc)
-        r = get(loc, allow_redirects=True, timeout=25)
+        r = http_get(loc, timeout=25)  # follow normally now
     else:
         # No redirect (or HEAD skipped) → fetch the page
-        r = get(detail_url, allow_redirects=True, timeout=25)
+        r = http_get(detail_url, timeout=25)
 
     html = r.text
     soup = BeautifulSoup(html, "lxml")  # faster/more lenient than html.parser
@@ -65,8 +75,8 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
     text = soup.get_text(" ", strip=True).lower()
     ended = ("this listing has ended" in text) or ("ended" in text and "listing" in text)
 
-    price = None
-    sale_type = None
+    price: float | None = None
+    sale_type: str | None = None
 
     # Try common price containers on ended pages
     cand = soup.select_one(
@@ -92,13 +102,14 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
 
     return ended, price, sale_type
 
+
 def _close_due_auctions():
     now = _now_utc()
     due = get_open_auctions_ending_before(now + CLOSE_DELAY)  # include those within the close delay
     for a in due:
-        auction_id = a['id']
-        detail_url = a.get('detail_url')
-        end_time = a['end_time']
+        auction_id = a["id"]
+        detail_url = a.get("detail_url")
+        end_time = _to_aware_utc(a.get("end_time"))
 
         if not end_time:
             continue
@@ -116,18 +127,12 @@ def _close_due_auctions():
 
             if ended:
                 if final_price is not None:
-                    finalize_auction(auction_id, final_price, 'HIGH', 'ENDED_CONFIRMED', sale_type)
+                    finalize_auction(auction_id, final_price, "HIGH", "ENDED_CONFIRMED", sale_type)
                     logger.info(f"[close] Auction {auction_id} ENDED_CONFIRMED @ {final_price}")
                 else:
                     # No visible price (best offer / unsold / cancelled)
                     recent = get_recent_max_price(auction_id, window_minutes=15)
-                    finalize_auction(
-                        auction_id,
-                        recent,
-                        'LOW',
-                        'ENDED_TENTATIVE',
-                        sale_type
-                    )
+                    finalize_auction(auction_id, recent, "LOW", "ENDED_TENTATIVE", sale_type)
                     logger.info(f"[close] Auction {auction_id} ENDED_TENTATIVE @ {recent} (no final price visible)")
             else:
                 # Edge: page says not ended yet; skip and try next tick
@@ -135,8 +140,9 @@ def _close_due_auctions():
         except Exception as e:
             # Network or parse failure — be safe, record tentative using recent observed max
             recent = get_recent_max_price(auction_id, window_minutes=15)
-            finalize_auction(auction_id, recent, 'LOW', 'ENDED_TENTATIVE', None)
+            finalize_auction(auction_id, recent, "LOW", "ENDED_TENTATIVE", None)
             logger.warning(f"[close] Auction {auction_id} tentative close (error): {e}")
+
 
 def _burst_polling_hook(poll_callback):
     """
@@ -144,6 +150,7 @@ def _burst_polling_hook(poll_callback):
     within BURST_WINDOW. Your scraper loop could call this with a roster of ending-soon auctions.
     """
     pass  # You can integrate with your existing scrape loop if desired.
+
 
 def tick():
     """

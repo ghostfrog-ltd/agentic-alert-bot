@@ -39,7 +39,7 @@ class SourceMeta:
         if self.last_scraped_at is None:
             return None
         last = _to_aware_utc(self.last_scraped_at)
-        return (last + timedelta(seconds=self.interval_s)) if last else None
+        return last + timedelta(seconds=self.interval_s) if last else None
 
 # -------------------------
 # Internal helpers

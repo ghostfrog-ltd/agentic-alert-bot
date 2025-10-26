@@ -5,11 +5,13 @@ import os, time, random
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+
 load_dotenv()  # ensure all modules see .env values
 
 from agent.actions.scrape_sources import run as run_scrape
 from agent.actions.close_auctions import tick as close_tick
 from agent.actions.scan_ending_soon import run as run_scan
+from agent.actions.alert_new_listings import run as alert_new_listings
 from infrastructure.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -25,7 +27,7 @@ except Exception:
 # -----------------------------
 SLEEP_BASE_S = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
 SLEEP_JITTER = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
-REFRESH_HRS  = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
+REFRESH_HRS = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
 
 _last_comps_at = None
 
@@ -45,7 +47,7 @@ def _maybe_refresh_comps():
         try:
             compute_daily_comps()
             _last_comps_at = now
-            logger.info("[Heartbeat] comps refreshed")
+            #logger.info("[Heartbeat] comps refreshed")
         except Exception as e:
             logger.error(f"[Heartbeat] comps refresh failed: {e}")
 
@@ -81,5 +83,11 @@ def tick():
         run_scan()
     except Exception as e:
         logger.error(f"[Heartbeat] scan run failed: {e}")
+
+    # 5) new listing email
+    try:
+        alert_new_listings()
+    except Exception as e:
+        logger.error(f"[Heartbeat] new listing email failed: {e}")
 
     _sleep_with_jitter()

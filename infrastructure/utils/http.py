@@ -5,6 +5,9 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib.parse import urlparse
+from infrastructure.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -96,3 +99,37 @@ def get(url: str, timeout: int = 25, headers: Optional[dict] = None) -> requests
     if r.ok:
         _BACKOFF.pop(_host(url), None)
     return r
+
+
+import time, random
+_last_call = 0.0
+
+def sleep_rate(base=4.0, jitter=0.35, floor=2.5):
+    global _last_call
+    now = time.time()
+    # enforce min gap since last call
+    spread = base * jitter
+    interval = max(floor, base + random.uniform(-spread, spread))
+    wait = (_last_call + interval) - now
+    if wait > 0:
+        time.sleep(wait)
+    _last_call = time.time()
+
+
+ENDED_MARKERS = (
+    "This listing was ended", "This listing has ended", "This listing was ended by the seller",
+    "Looks like this item has been sold", "The listing you’re looking for has ended",
+    "invalid item", "no longer available"
+)
+
+def is_ended_listing(html_lower: str) -> bool:
+    return any(k.lower() in html_lower for k in ENDED_MARKERS)
+
+def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str = ""):
+    status = getattr(r, "status_code", "NA")
+    length = len(getattr(r, "text", "") or "")
+    msg = f"[{domain}] invalid/blocked item page: {url} (status={status}, len={length})"
+    if reason:
+        msg += f" reason={reason}"
+    logger.warning(msg)
+

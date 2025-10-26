@@ -300,12 +300,12 @@ class Adapter(AuctionAdapter):
             store_url = STORE_URL.format(seller=SELLER, page=page)
             try:
                 rs = _get(store_url, session, timeout=20, retries=2)
-                logger.info(f"[{self.DOMAIN}] GET {store_url} -> {rs.status_code} {len(rs.text)} bytes (store)")
+                #logger.info(f"[{self.DOMAIN}] GET {store_url} -> {rs.status_code} {len(rs.text)} bytes (store)")
                 ss = BeautifulSoup(rs.text, "lxml")
                 urls_this = _extract_listing_urls_from_doc(ss, store_url)
                 if page == 1 and not urls_this:
                     raw_itm = [a.get('href','') for a in ss.find_all('a') if '/itm/' in (a.get('href','') or '')]
-                    logger.info(f"[{self.DOMAIN}] store p1 raw '/itm/' anchors={len(raw_itm)} sample={raw_itm[:5]}")
+                    #logger.info(f"[{self.DOMAIN}] store p1 raw '/itm/' anchors={len(raw_itm)} sample={raw_itm[:5]}")
             except Exception as e:
                 logger.warning(f"[{self.DOMAIN}] store page failed p{page}: {e}")
 
@@ -381,7 +381,7 @@ class Adapter(AuctionAdapter):
 
             # Skip CF/interstitial pages (don't poison DB with that title)
             if title.lower().startswith("checking your browser"):
-                logger.info(f"[{self.DOMAIN}] interstitial item page; skipping {url}")
+                #logger.info(f"[{self.DOMAIN}] interstitial item page; skipping {url}")
                 return False
 
             # Price

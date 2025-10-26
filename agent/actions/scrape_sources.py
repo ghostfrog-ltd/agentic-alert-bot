@@ -1,39 +1,105 @@
 from infrastructure.scraper.registry import AdapterRegistry
-from infrastructure.db.schema import upsert_article
-from infrastructure.db import schema
+from infrastructure.scraper.auction_registry import AuctionRegistry
+from infrastructure.db.schema import upsert_article, resolve_source_field
 from infrastructure.utils.logger import get_logger
+from infrastructure.db import schema
 
-#crypto
+
+# News adapters
 from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt
+
+# Auction adapters
+from infrastructure.scraper.adapters.niche.ebay import motomine
 
 logger = get_logger(__name__)
 
-registry = AdapterRegistry(
+# News registry
+news_registry = AdapterRegistry(
     adapters=[
         coindesk.Adapter(),
         cointelegraph.Adapter(),
         decrypt.Adapter(),
     ],
-    repo=schema,
+    repo=schema
 )
+
+# Auction registry
+auction_registry = AuctionRegistry(
+    adapters=[
+        motomine.Adapter(),
+    ]
+)
+
+def source_enabled(name: str) -> bool:
+    """
+    Check if a source is enabled in the sources table.
+    Defaults to True if the source isn't found (safe fallback).
+    """
+    value = resolve_source_field(name, "enabled")
+    return bool(value) if value is not None else True
+
+
+def run_news():
+    """Scrape and save news articles from enabled sources."""
+    results = []
+    try:
+        for adapter in news_registry.adapters:
+            if not source_enabled(adapter.DOMAIN):
+                logger.info(f"[scrape-news] Skipping disabled source: {adapter.DOMAIN}")
+                continue
+
+        for article in (news_registry.crawl_all() or []):
+            # Default fallback type = "website"
+            if getattr(article, "type", "website") in ("news", "website", "market"):
+                try:
+                    upsert_article(article)
+                    logger.info(
+                        f"[scrape-news] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[scrape-news] Save failed {getattr(article,'url','')}: {e}"
+                    )
+            else:
+                logger.debug(
+                    f"[scrape-news] Skipping non-website type: {getattr(article,'type','')}"
+                )
+            results.append(article)
+    except Exception as e:
+        logger.error(f"[scrape-news] run_news() failed: {e}")
+    return results
+
+
+def run_auctions():
+    """Scrape and save auction listings from enabled auction sources."""
+    try:
+        for adapter in auction_registry.adapters:
+            if not source_enabled(adapter.DOMAIN):
+                logger.info(f"[scrape-auctions] Skipping disabled source: {adapter.DOMAIN}")
+                continue
+
+            urls = adapter.fetch_listing_urls()
+            logger.info(f"[scrape-auctions] {adapter.DOMAIN}: fetched {len(urls)} URLs")
+            for url in urls:
+                try:
+                    adapter.parse_auction(url)
+                except Exception as e:
+                    logger.warning(
+                        f"[scrape-auctions] {adapter.DOMAIN} parse failed {url}: {e}"
+                    )
+    except Exception as e:
+        logger.error(f"[scrape-auctions] run_auctions() failed: {e}")
+
 
 def run():
     """
-    Runs one scrape cycle and ALWAYS returns a list (never None).
-    Also keeps your 'website' type branch.
+    Main runner for all scrapers.
+    - Runs news scrapers and saves articles.
+    - Runs auction scrapers and upserts auction listings.
+    Returns list of news articles (auction results are written directly to DB).
     """
-    results = []
-    try:
-        for article in (registry.crawl_all() or []):
-            if getattr(article, "type", "website") in ("news", "website", "market"):
-                try:
-                    upsert_article(article)  # OK to keep if you want explicit control here
-                    logger.info(f"[scrape] Saved: {getattr(article,'title','')} — {getattr(article,'url','')}")
-                except Exception as e:
-                    logger.warning(f"[scrape] Save failed {getattr(article,'url','')}: {e}")
-            else:
-                logger.debug(f"[scrape] Skipping non-website type: {getattr(article,'type','')}")
-            results.append(article)
-    except Exception as e:
-        logger.error(f"[scrape] run() failed: {e}")
-    return results
+    logger.info("[scrape] Starting full scrape cycle...")
+    news_results = run_news()
+    #run_auctions()
+    #logger.info("[scrape] Scrape cycle complete.")
+    return news_results

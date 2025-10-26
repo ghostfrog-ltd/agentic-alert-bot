@@ -37,3 +37,15 @@ class SiteAdapter(ABC):
     def parse_article(self, url: str) -> Article:
         """Fetch + parse one article into normalized fields."""
         ...
+
+
+class AuctionAdapter(ABC):
+    @abstractmethod
+    def fetch_listing_urls(self) -> list[str]:
+        """Return a list of URLs to individual auction items."""
+        pass
+
+    @abstractmethod
+    def parse_auction(self, url: str) -> bool:
+        """Parse the auction page and upsert into DB (return True if successful)."""
+        pass

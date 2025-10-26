@@ -113,6 +113,7 @@ def resolve_source_id(domain_or_name: str) -> int:
     connection.commit()
     return new_id
 
+
 def find_by_url(url: str):
     with connection.cursor() as cur:
         cur.execute("""
@@ -131,6 +132,7 @@ def find_by_url(url: str):
             "fetched_at", "content", "sentiment", "created_at_utc", "updated_at_utc"]
     return dict(zip(keys, row))
 
+
 def resolve_source_field(domain: str, field: str) -> Optional[str]:
     with connection.cursor() as cur:
         cur.execute(
@@ -139,6 +141,7 @@ def resolve_source_field(domain: str, field: str) -> Optional[str]:
         )
         row = cur.fetchone()
         return row[0] if row else None
+
 
 def update_content(url: str, content: str, title=None, summary=None, published_at=None):
     with connection.cursor() as cur:
@@ -154,11 +157,13 @@ def update_content(url: str, content: str, title=None, summary=None, published_a
         """, (title, summary, published_at, content, url))
     connection.commit()
 
+
 def resolve_source_niche(domain: str) -> Optional[str]:
     with connection.cursor() as cur:
         cur.execute("SELECT niche FROM sources WHERE base_url LIKE %s OR name = %s LIMIT 1", (f'%{domain}%', domain))
         row = cur.fetchone()
         return row[0] if row else None
+
 
 def article_exists_by_url(url: str) -> bool:
     with connection.cursor() as cur:
@@ -280,3 +285,141 @@ def create_scrape_state():
          )
     cursor.execute(q)
     connection.commit()
+
+
+def create_auction_tables():
+    with connection.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auction_listings (
+                id SERIAL PRIMARY KEY,
+                source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                external_id TEXT UNIQUE NOT NULL,
+                title TEXT,
+                price_current BIGINT,
+                price_final BIGINT,
+                bids_count INTEGER,
+                end_time TIMESTAMP,
+                status TEXT DEFAULT 'active',
+                url TEXT,
+                first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fetched_at TIMESTAMP,
+                roi_estimate DOUBLE PRECISION,
+                max_bid BIGINT,
+                notes TEXT
+            );
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auction_price_history (
+                id SERIAL PRIMARY KEY,
+                auction_id INTEGER REFERENCES auction_listings(id) ON DELETE CASCADE,
+                price BIGINT,
+                bids_count INTEGER,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+    connection.commit()
+    print("Auction tables created or already exist.")
+
+
+def upsert_auction_listing(
+        source: str,  # <-- add this
+        external_id: str,
+        title: str,
+        price_current: int,
+        bids_count: int,
+        end_time,
+        url: str,
+        roi_estimate: float = None,
+        max_bid: int = None,
+        notes: str = None,
+        source_id: int | None = None  # <-- optional, since you also have source_id column
+):
+    conn = connection
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO auction_listings (
+                source, external_id, title, price_current, bids_count, end_time,
+                url, fetched_at, roi_estimate, max_bid, notes, last_seen, source_id
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s,
+                %s, CURRENT_TIMESTAMP, %s, %s, %s, CURRENT_TIMESTAMP, %s
+            )
+            ON CONFLICT (external_id) DO UPDATE
+            SET
+                source        = EXCLUDED.source,
+                title         = EXCLUDED.title,
+                price_current = EXCLUDED.price_current,
+                bids_count    = EXCLUDED.bids_count,
+                end_time      = EXCLUDED.end_time,
+                url           = EXCLUDED.url,
+                fetched_at    = CURRENT_TIMESTAMP,
+                roi_estimate  = EXCLUDED.roi_estimate,
+                max_bid       = EXCLUDED.max_bid,
+                notes         = EXCLUDED.notes,
+                last_seen     = CURRENT_TIMESTAMP,
+                source_id     = EXCLUDED.source_id;
+        """, (
+            source, external_id, title, price_current, bids_count, end_time,
+            url, roi_estimate, max_bid, notes, source_id
+        ))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()  # keep global connection open; don't conn.close()
+
+
+def insert_price_history(auction_id: int, price: int, bids_count: int):
+    """Insert a new row into auction_price_history to track changes over time."""
+    conn = connection
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO auction_price_history (auction_id, price, bids_count)
+        VALUES (%s, %s, %s);
+    """, (auction_id, price, bids_count))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_auction_sold(external_id: str, final_price: int):
+    """Mark auction as sold and set final hammer price."""
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+            SET status = 'sold',
+                price_final = %s,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE external_id = %s;
+        """, (final_price, external_id))
+    connection.commit()
+
+
+def mark_auction_expired(external_id: str):
+    """Mark auction as unsold/expired if end time has passed and no sale."""
+    with connection.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+            SET status = 'unsold',
+                last_seen = CURRENT_TIMESTAMP
+            WHERE external_id = %s;
+        """, (external_id,))
+    connection.commit()
+
+
+def get_active_auctions():
+    """Return all active auctions (useful for heartbeat polling)."""
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT id, source_id, external_id, title, price_current, bids_count, end_time, url
+            FROM auction_listings
+            WHERE status = 'active'
+            ORDER BY end_time ASC;
+        """)
+        return cur.fetchall()

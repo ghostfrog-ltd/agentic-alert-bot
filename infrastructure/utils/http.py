@@ -21,14 +21,16 @@ DEFAULT_HEADERS = {
 # per-host pacing
 _LAST_CALL = {}
 _MIN_GAP = {
-    "coindesk.com": 6.0,   # ↑ from 2.5 → 6s (tune as needed)
+    "coindesk.com": 6.0,  # ↑ from 2.5 → 6s (tune as needed)
 }
 
 # 429 backoff state
 _BACKOFF = {}  # host -> seconds
 
+
 def _host(url: str) -> str:
     return urlparse(url).netloc
+
 
 def _rate_limit(url: str):
     host = _host(url)
@@ -46,6 +48,7 @@ def _rate_limit(url: str):
     if wait > 0:
         time.sleep(wait)
     _LAST_CALL[host] = time.time()
+
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -65,18 +68,39 @@ def make_session() -> requests.Session:
     s.headers.update(DEFAULT_HEADERS)
     return s
 
+
 SESSION = make_session()
 
-def get(url: str, timeout: int = 25, headers: Optional[dict] = None) -> requests.Response:
+
+# replace your get(...) with this version:
+
+def get(
+        url: str,
+        timeout: int = 25,
+        headers: Optional[dict] = None,
+        session: requests.Session | None = None,
+        **kwargs
+) -> requests.Response:
+    """
+    Thin wrapper around requests.get that:
+      - rate limits per host
+      - handles 429 with backoff
+      - passes through arbitrary requests kwargs (e.g., allow_redirects, proxies)
+    """
     _rate_limit(url)
+
+    s = session or SESSION
     h = DEFAULT_HEADERS.copy()
     if headers:
         h.update(headers)
 
-    r = SESSION.get(url, timeout=timeout, headers=h)
+    # default to following redirects unless caller overrides
+    if "allow_redirects" not in kwargs:
+        kwargs["allow_redirects"] = True
+
+    r = s.get(url, timeout=timeout, headers=h, **kwargs)
 
     if r.status_code == 429:
-        # honor Retry-After if present; else exponential per-host backoff
         host = _host(url)
         ra = r.headers.get("Retry-After")
         if ra:
@@ -86,23 +110,24 @@ def get(url: str, timeout: int = 25, headers: Optional[dict] = None) -> requests
                 sleep_for = 10
         else:
             prev = _BACKOFF.get(host, 6.0) or 6.0
-            sleep_for = min(prev * 2, 60.0)  # cap at 60s
+            sleep_for = min(prev * 2, 60.0)
             _BACKOFF[host] = sleep_for
 
         time.sleep(sleep_for + random.uniform(0.3, 0.9))
         _LAST_CALL[host] = time.time()
 
-        r = SESSION.get(url, timeout=timeout, headers=h)
+        r = s.get(url, timeout=timeout, headers=h, **kwargs)
 
     r.raise_for_status()
-    # success → reset backoff for this host
     if r.ok:
         _BACKOFF.pop(_host(url), None)
     return r
 
 
 import time, random
+
 _last_call = 0.0
+
 
 def sleep_rate(base=4.0, jitter=0.35, floor=2.5):
     global _last_call
@@ -122,8 +147,10 @@ ENDED_MARKERS = (
     "invalid item", "no longer available"
 )
 
+
 def is_ended_listing(html_lower: str) -> bool:
     return any(k.lower() in html_lower for k in ENDED_MARKERS)
+
 
 def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str = ""):
     status = getattr(r, "status_code", "NA")
@@ -133,3 +160,31 @@ def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str
         msg += f" reason={reason}"
     logger.warning(msg)
 
+# optional: add a HEAD helper that mirrors get()
+def head(
+    url: str,
+    timeout: int = 15,
+    headers: Optional[dict] = None,
+    session: requests.Session | None = None,
+    **kwargs
+) -> requests.Response:
+    _rate_limit(url)
+    s = session or SESSION
+    h = DEFAULT_HEADERS.copy()
+    if headers:
+        h.update(headers)
+    if "allow_redirects" not in kwargs:
+        kwargs["allow_redirects"] = True
+    r = s.head(url, timeout=timeout, headers=h, **kwargs)
+    if r.status_code == 429:
+        host = _host(url)
+        ra = r.headers.get("Retry-After")
+        sleep_for = int(ra) if ra and ra.isdigit() else min(_BACKOFF.get(host, 6.0) * 2 if _BACKOFF.get(host) else 6.0, 60.0)
+        _BACKOFF[host] = sleep_for
+        time.sleep(sleep_for + random.uniform(0.3, 0.9))
+        _LAST_CALL[host] = time.time()
+        r = s.head(url, timeout=timeout, headers=h, **kwargs)
+    r.raise_for_status()
+    if r.ok:
+        _BACKOFF.pop(_host(url), None)
+    return r

@@ -290,24 +290,30 @@ def _extract_bids_count(soup: BeautifulSoup, html: str) -> int:
             pass
     return 0
 
+# before: returned naive UTC
 def _extract_end_time(soup: BeautifulSoup, html: str) -> datetime | None:
     t = soup.select_one("time[datetime]")
     if t and t.has_attr("datetime"):
-        iso = t["datetime"].strip()
         try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return (
+                datetime.fromisoformat(t["datetime"].replace("Z", "+00:00"))
+                .astimezone(timezone.utc)          # <-- keep AWARE UTC
+            )
         except Exception:
-            pass
-    m = ENDDATE_RX.search(html)
-    if m:
-        iso = m.group(1)
-        try:
-            dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        except Exception:
-            pass
+            return None
     return None
+
+# before: made 'now' naive; now make both aware and normalize
+def _secs_left(end_time: datetime | None) -> int | None:
+    if not end_time:
+        return None
+    if end_time.tzinfo is None:
+        end_aware = end_time.replace(tzinfo=timezone.utc)
+    else:
+        end_aware = end_time.astimezone(timezone.utc)
+    now_aware = datetime.now(timezone.utc)
+    delta = (end_aware - now_aware).total_seconds()
+    return int(delta) if delta > 0 else 0
 
 def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | None = None) -> str | None:
     m = ITEM_ID_RX.search(url)
@@ -332,12 +338,10 @@ def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | No
     v = (q.get("item") or [None])[0]
     if v and v.isdigit() and 9 <= len(v) <= 15:
         return v
-    # do NOT fabricate a hash id; skip instead
     return None
 
 def _infer_sale_type(_soup: BeautifulSoup, page_text: str) -> str | None:
     t = page_text.lower()
-    # Prefer auction if bids are present
     if " bid" in t or " bids" in t:
         return "auction"
     if "buy it now" in t or "buy it now price" in t:
@@ -370,14 +374,12 @@ class Adapter(AuctionAdapter):
         while True:
             urls_this: list[str] = []
 
-            # Storefront
             store_url = STORE_URL.format(seller=SELLER, page=page)
             r = _robust_get(store_url, session, base_referer="https://www.ebay.co.uk/")
             if r:
                 soup = BeautifulSoup(r.text, "lxml")
                 urls_this = _extract_listing_urls_from_doc(soup, store_url)
 
-            # Seller items
             if not urls_this:
                 seller_url = SELLER_ITEMS.format(seller=SELLER, page=page)
                 r = _robust_get(seller_url, session, base_referer="https://www.ebay.co.uk/")
@@ -385,7 +387,6 @@ class Adapter(AuctionAdapter):
                     soup = BeautifulSoup(r.text, "lxml")
                     urls_this = _extract_listing_urls_from_doc(soup, seller_url)
 
-            # SRP fallback
             if not urls_this:
                 desktop_url = DESKTOP_SRP.format(seller=SELLER, page=page)
                 r = _robust_get(desktop_url, session, base_referer="https://www.ebay.co.uk/")
@@ -452,7 +453,7 @@ class Adapter(AuctionAdapter):
                 return False
 
             bids_count = int(_extract_bids_count(soup, html) or 0)
-            end_time = _extract_end_time(soup, html)
+            end_time = _extract_end_time(soup, html)  # <-- now AWARE UTC
 
             title = (title or "").strip()[:255]
             url_clean = _strip_params(url)[:1024]
@@ -461,19 +462,19 @@ class Adapter(AuctionAdapter):
             source_name, source_id = _resolve_source(self.DOMAIN)
 
             upsert_auction_listing(
-                source=source_name,                # TEXT NOT NULL
-                external_id=external_id,           # eBay item id
+                source=source_name,
+                external_id=external_id,
                 title=title,
                 price_current=price_current,
                 bids_count=bids_count,
-                end_time=end_time,                 # may be None
-                url=url_clean,                     # listing-page URL (cleaned)
-                detail_url=detail_url,             # canonical detail URL
-                sale_type=sale_type,               # 'auction' | 'bin' | 'best_offer' | None
+                end_time=end_time,                 # aware UTC or None
+                url=url_clean,
+                detail_url=detail_url,
+                sale_type=sale_type,
                 roi_estimate=None,
                 max_bid=None,
                 notes=None,
-                source_id=source_id,               # optional FK to sources.id
+                source_id=source_id,
             )
 
             logger.info(

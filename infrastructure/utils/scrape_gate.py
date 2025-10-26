@@ -9,26 +9,37 @@ from typing import Optional, Tuple
 from infrastructure.db.schema import (
     resolve_source_id,
     resolve_source_field,
-    connection,   # assuming you expose this already
+    connection,   # shared global conn
 )
+
+# -------------------------
+# Time helpers
+# -------------------------
+def _to_aware_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 @dataclass
 class SourceMeta:
     id: Optional[int]
     name: str
-    interval_s: int                 # base interval from DB or default (no jitter)
-    last_scraped_at: Optional[datetime]
-    effective_interval_s: Optional[float] = None  # interval actually used for this decision (with jitter)
+    interval_s: int                 # base interval (no jitter)
+    last_scraped_at: Optional[datetime]   # AWARE UTC or None
+    effective_interval_s: Optional[float] = None  # jittered interval used for the decision
 
     @property
     def next_due_at(self) -> Optional[datetime]:
         """
-        NOTE: This uses the base interval (no jitter) so it's stable for UI.
-        For the specific decision, check effective_interval_s returned by gate_scrape().
+        Uses the *base* interval (no jitter) so this is stable for logs/UI.
         """
         if self.last_scraped_at is None:
             return None
-        return self.last_scraped_at + timedelta(seconds=self.interval_s)
+        last = _to_aware_utc(self.last_scraped_at)
+        return (last + timedelta(seconds=self.interval_s)) if last else None
 
 # -------------------------
 # Internal helpers
@@ -66,11 +77,10 @@ def _get_source_meta(source_key: str, default_interval_s: int = 6 * 60 * 60) -> 
     name = resolve_source_field(source_key, "name") or source_key
     sid = resolve_source_id(source_key)
 
-    # Start with defaults
     interval_s = default_interval_s
-    last = None
+    last: Optional[datetime] = None
 
-    # Optional ENV override for quick tuning, e.g. EBAY_CONSOLES_INTERVAL_S=300
+    # Optional ENV override e.g. EBAY_CONSOLES_INTERVAL_S=300
     env_interval = _get_env_int(name, "INTERVAL_S")
     if env_interval is not None:
         interval_s = env_interval
@@ -88,31 +98,33 @@ def _get_source_meta(source_key: str, default_interval_s: int = 6 * 60 * 60) -> 
         if row:
             if row[0] is not None:
                 interval_s = int(row[0])
-            last = row[1]
+            last = _to_aware_utc(row[1])  # normalize to aware UTC
 
     return SourceMeta(id=sid, name=name, interval_s=interval_s, last_scraped_at=last)
 
 def mark_scraped(meta: SourceMeta, when: Optional[datetime] = None) -> None:
-    """Persist last_scraped_at for this source (no-op if we don't have an id)."""
+    """
+    Persist last_scraped_at for this source (aware UTC). No-op if no id.
+    """
     if meta.id is None:
         return
-    ts = (when or datetime.utcnow().replace(tzinfo=timezone.utc)).replace(tzinfo=None)
-    with connection.cursor() as cur:
+    ts = _to_aware_utc(when) or _now_utc()
+    # use a transaction and write an aware timestamptz
+    with connection, connection.cursor() as cur:
         cur.execute("UPDATE sources SET last_scraped_at = %s WHERE id = %s", (ts, meta.id))
-    connection.commit()
 
 # -------------------------
 # Public gate with jitter
 # -------------------------
 
-# set a single global default jitter — e.g. ±15%
+# global default jitter — e.g. ±15%
 DEFAULT_JITTER_PCT = 0.15
 
 def gate_scrape(
     source_key: str,
     prefer_interval_s: Optional[int] = None,
     pre_mark: bool = True,
-    jitter_pct: Optional[float] = None,  # optional override from code if ever needed
+    jitter_pct: Optional[float] = None,  # optional override
     skip_probability: float = 0.0,
 ) -> Tuple[bool, SourceMeta]:
     """
@@ -131,7 +143,7 @@ def gate_scrape(
 
     # Use passed jitter or default global
     j = jitter_pct if jitter_pct is not None else DEFAULT_JITTER_PCT
-    j = max(0.0, min(j, 0.90))  # safety clamp
+    j = max(0.0, min(j, 0.90))  # clamp
 
     # Calculate effective jittered interval
     if j > 0.0:
@@ -141,17 +153,17 @@ def gate_scrape(
     else:
         effective_interval = float(base_interval)
 
-    # Rebuild meta with the effective interval so we can log it if needed
+    # Rebuild meta with effective interval (for logging/inspection)
     meta = SourceMeta(
         id=meta.id,
         name=meta.name,
         interval_s=base_interval,
-        last_scraped_at=meta.last_scraped_at,
+        last_scraped_at=_to_aware_utc(meta.last_scraped_at),
         effective_interval_s=effective_interval,
     )
 
-    # Due check
-    now = datetime.utcnow().replace(tzinfo=timezone.utc).replace(tzinfo=None)
+    # Due check (all aware UTC)
+    now = _now_utc()
     if meta.last_scraped_at is not None:
         elapsed = (now - meta.last_scraped_at).total_seconds()
         if elapsed < effective_interval:

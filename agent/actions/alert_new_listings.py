@@ -1,9 +1,10 @@
 from __future__ import annotations
 from typing import Iterable, Optional
+from datetime import datetime, timedelta, timezone
+
 from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import connection
 from infrastructure.utils.emailer import send_email
-from datetime import datetime, timedelta, timezone
 
 logger = get_logger(__name__)
 
@@ -16,44 +17,87 @@ MAX_BODY_CHARS = 12000
 FIRST_RUN_LOOKBACK_HOURS = 24  # or 168 for a full week
 
 
-def _get_last_sent_at(cur):
+# ---------- time helpers (AWARE UTC end-to-end for timestamptz) ----------
+def to_aware_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def utc_now_aware() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# ---------- state ----------
+def _get_last_sent_at(cur) -> datetime | None:
     cur.execute("SELECT last_sent_at FROM alert_state WHERE name=%s", (ALERT_NAME,))
     row = cur.fetchone()
-    return row[0] if row else None
+    return to_aware_utc(row[0]) if row and row[0] else None
 
 
 def _set_last_sent_at(cur, ts: datetime):
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO alert_state (name, last_sent_at)
         VALUES (%s, %s)
         ON CONFLICT (name) DO UPDATE SET last_sent_at=EXCLUDED.last_sent_at
-    """, (ALERT_NAME, ts))
+        """,
+        (ALERT_NAME, to_aware_utc(ts)),
+    )
 
 
+# ---------- data ----------
 def _fetch_new_listings(cur, cutoff: datetime):
     """
-    IMPORTANT: ASC order so we can advance the watermark safely
-    without skipping older-but-still-new rows.
+    NEW: filter on first_seen (timestamptz), not fetched_at.
+    ASC order so we can advance the watermark safely without skipping.
     """
+    cutoff = to_aware_utc(cutoff)
     if SOURCES_FILTER:
-        cur.execute(f"""
-            SELECT source, title, price_current, url, fetched_at
+        cur.execute(
+            f"""
+            SELECT source, title, price_current, url, first_seen
             FROM auction_listings
-            WHERE fetched_at > %s AND source = ANY(%s::text[])
-            ORDER BY fetched_at ASC
+            WHERE first_seen > %s AND source = ANY(%s::text[])
+            ORDER BY first_seen ASC
             LIMIT {MAX_ITEMS}
-        """, (cutoff, list(SOURCES_FILTER)))
+            """,
+            (cutoff, list(SOURCES_FILTER)),
+        )
     else:
-        cur.execute(f"""
-            SELECT source, title, price_current, url, fetched_at
+        cur.execute(
+            f"""
+            SELECT source, title, price_current, url, first_seen
             FROM auction_listings
-            WHERE fetched_at > %s
-            ORDER BY fetched_at ASC
+            WHERE first_seen > %s
+            ORDER BY first_seen ASC
             LIMIT {MAX_ITEMS}
-        """, (cutoff,))
+            """,
+            (cutoff,),
+        )
     return cur.fetchall()
 
 
+def _debug_peek(cur, cutoff: datetime):
+    """Log quick counts to confirm which timestamp is gating results."""
+    cutoff = to_aware_utc(cutoff)
+    cur.execute("SELECT COUNT(*) FROM auction_listings WHERE first_seen > %s", (cutoff,))
+    c1 = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM auction_listings WHERE fetched_at > %s", (cutoff,))
+    c2 = cur.fetchone()[0]
+    cur.execute("SELECT MAX(first_seen), MAX(fetched_at) FROM auction_listings")
+    max_first, max_fetch = cur.fetchone()
+    logger.info(
+        "[alert_new_listings] peek: first_seen>%s -> %s, fetched_at>%s -> %s | max first_seen=%s, max fetched_at=%s",
+        cutoff.isoformat(), c1, cutoff.isoformat(), c2,
+        (to_aware_utc(max_first).isoformat() if max_first else None),
+        (to_aware_utc(max_fetch).isoformat() if max_fetch else None),
+    )
+
+
+# ---------- formatting ----------
 def _format_money(v):
     if v is None:
         return "£—"
@@ -63,21 +107,26 @@ def _format_money(v):
         return f"£{v}"
 
 
-def _utc_aware(dt):
-    if dt is None:
-        return None
-    # If naive, assume it’s already UTC from the DB and attach tzinfo
-    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-
-
+# ---------- main ----------
 def run():
     conn = connection
     cur = conn.cursor()
 
-    last_sent = _get_last_sent_at(cur)  # may be naive or aware
-    now = datetime.now(timezone.utc)  # aware
-    cutoff = _utc_aware(last_sent) or (now - timedelta(minutes=WINDOW_MINUTES))
-    cutoff = _utc_aware(cutoff)  # ensure aware
+    # Ensure the session speaks UTC; harmless if already set
+    try:
+        cur.execute("SET TIME ZONE 'UTC'")
+    except Exception:
+        pass
+
+    last_sent = _get_last_sent_at(cur)  # aware UTC or None
+    now_aware = utc_now_aware()
+
+    # If never sent, look back FIRST_RUN_LOOKBACK_HOURS; else use WINDOW_MINUTES or last_sent (whichever is later)
+    default_cut = (now_aware - timedelta(hours=FIRST_RUN_LOOKBACK_HOURS)) if last_sent is None else (now_aware - timedelta(minutes=WINDOW_MINUTES))
+    cutoff = max(default_cut, last_sent) if last_sent else default_cut  # aware UTC
+
+    # Peek to see what the DB actually has beyond the cutoff
+    _debug_peek(cur, cutoff)
 
     rows = _fetch_new_listings(cur, cutoff)
     if not rows:
@@ -86,30 +135,37 @@ def run():
 
     lines = []
     by_source_count = {}
-    newest_seen = cutoff  # aware
+    newest_seen = cutoff  # aware UTC
 
-    for source, title, price, url, fetched_at in rows:
-        fetched_at = _utc_aware(fetched_at)  # normalize row timestamp
+    for source, title, price, url, first_seen in rows:
+        first_seen = to_aware_utc(first_seen)
         by_source_count[source] = by_source_count.get(source, 0) + 1
-        if fetched_at and fetched_at > newest_seen:
-            newest_seen = fetched_at
+        if first_seen and first_seen > newest_seen:
+            newest_seen = first_seen
         safe_title = (title or "").strip().replace("\n", " ")
         lines.append(f"- [{source}] {safe_title} — {_format_money(price)}\n  {url}")
 
-    subject = f"🕹 New listings ({len(rows)}) — " + ", ".join(f"{s}:{c}" for s, c in sorted(by_source_count.items()))
+    subject = "🕹 New listings ({}) — {}".format(
+        len(rows),
+        ", ".join(f"{s}:{c}" for s, c in sorted(by_source_count.items()))
+    )
     body = (
-            f"New listings since {cutoff.isoformat()}:\n\n"
-            + "\n".join(lines)
-            + "\n\n(Showing up to {MAX_ITEMS} this run; older items in the window will follow next.)"
+        f"New listings since {cutoff.isoformat()}:\n\n"
+        + "\n".join(lines)
+        + f"\n\n(Showing up to {MAX_ITEMS} this run; older items in the window will follow next.)"
     )
     if len(body) > MAX_BODY_CHARS:
         body = body[:MAX_BODY_CHARS] + "\n\n…(truncated)"
 
     try:
         send_email(subject=subject, body=body)
-        _set_last_sent_at(cur, newest_seen)  # aware ⇒ fine for timestamptz
+        _set_last_sent_at(cur, newest_seen)  # persist as aware UTC
         conn.commit()
-        logger.info("[alert_new_listings] emailed %d items; watermark -> %s", len(rows), newest_seen.isoformat())
+        logger.info(
+            "[alert_new_listings] emailed %d items; watermark -> %s",
+            len(rows),
+            newest_seen.isoformat(),
+        )
     except Exception as e:
         conn.rollback()
         logger.error(f"[alert_new_listings] failed to send or persist state: {e}")

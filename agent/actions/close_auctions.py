@@ -9,6 +9,9 @@ from infrastructure.db.schema import (
 from infrastructure.utils.logger import get_logger
 from infrastructure.utils.http import get  # your resilient HTTP helper
 from bs4 import BeautifulSoup
+from infrastructure.utils.http import get, head  # ← add head
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 logger = get_logger(__name__)
 
@@ -37,15 +40,28 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
     """
     Returns (ended, price, sale_type)
     If ended is True but price is None, price was hidden/unavailable.
-    sale_type: 'auction'|'bin'|'best_offer' if you can infer; else None.
     """
-    # Final fetch of the detail page
-    r = get(detail_url, allow_redirects=True)
-    r.raise_for_status()
-    html = r.text
-    soup = BeautifulSoup(html, "html.parser")
+    # 1) Cheap HEAD probe (don’t follow redirects)
+    try:
+        hr = head(detail_url, allow_redirects=False, timeout=15)
+    except Exception:
+        # fallback straight to GET on transient HEAD failures
+        hr = None
 
-    # --- Heuristics (adjust CSS/text as you refine):
+    # If we got a redirect, follow once (usually to "this listing has ended")
+    if hr is not None and 300 <= hr.status_code < 400 and hr.headers.get("Location"):
+        loc = hr.headers["Location"]
+        if loc.startswith("/"):
+            loc = urljoin(detail_url, loc)
+        r = get(loc, allow_redirects=True, timeout=25)
+    else:
+        # No redirect (or HEAD skipped) → fetch the page
+        r = get(detail_url, allow_redirects=True, timeout=25)
+
+    html = r.text
+    soup = BeautifulSoup(html, "lxml")  # faster/more lenient than html.parser
+
+    # --- Heuristics:
     text = soup.get_text(" ", strip=True).lower()
     ended = ("this listing has ended" in text) or ("ended" in text and "listing" in text)
 
@@ -53,13 +69,18 @@ def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | N
     sale_type = None
 
     # Try common price containers on ended pages
-    cand = soup.select_one("#prcIsum, .x-price-primary, .vi-price, .display-price, .vi-VR-cvipPrice, .notranslate")
+    cand = soup.select_one(
+        "#prcIsum, .x-price-primary, .vi-price, .display-price, "
+        ".vi-VR-cvipPrice, .notranslate"
+    )
     if cand:
-        # Strip non-numerics robustly
         import re
         m = re.search(r"([0-9]+[0-9,]*\.?[0-9]*)", cand.get_text())
         if m:
-            price = float(m.group(1).replace(",", ""))
+            try:
+                price = float(m.group(1).replace(",", ""))
+            except Exception:
+                price = None
 
     # Infer sale type with weak heuristics
     if "best offer accepted" in text:

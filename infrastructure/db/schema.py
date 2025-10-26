@@ -505,15 +505,6 @@ def insert_or_ignore_listing(
         """, (source, external_id, title, url, price_current, bids_count, end_time, model_key))
 
 
-def record_alert(external_id: str, snipe_score: float, max_bid: float):
-    conn = connection
-    with conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO alerts (listing_external_id, snipe_score, max_bid) VALUES (%s,%s,%s)",
-            (external_id, snipe_score, max_bid)
-        )
-
-
 def latest_comps_map() -> Dict[str, Dict[str, Any]]:
     """
     Returns { model_key: {median_final_price, mean_final_price, samples} } for latest computed_at per model.
@@ -551,25 +542,53 @@ def compute_daily_comps():
         """)
 
 
+def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, int | None]:
+    """
+    Upsert an alert; return (created_now, alert_id)
+    created_now=True means we should send an email.
+    """
+    cur = connection.cursor()
+    cur.execute("""
+        INSERT INTO alerts (external_id, score, max_bid, created_at)
+        VALUES (%s, %s, %s, NOW())
+        ON CONFLICT (external_id) DO UPDATE
+            SET score = EXCLUDED.score,
+                max_bid = EXCLUDED.max_bid,
+                updated_at = NOW()
+        RETURNING id, (xmax = 0) AS inserted;
+    """, (external_id, score, max_bid))
+    row = cur.fetchone()
+    connection.commit()
+    # On Postgres, xmax=0 implies freshly inserted in this simple pattern
+    created_now = bool(row[1])
+    return created_now, row[0]
+
+
+def mark_alert_emailed(alert_id: int):
+    cur = connection.cursor()
+    cur.execute("UPDATE alerts SET sent_at = NOW() WHERE id = %s", (alert_id,))
+    connection.commit()
+
+
 def upsert_auction_listing(
-    *,
-    source: str,
-    external_id: str,
-    title: str,
-    price_current: Optional[float | int | Decimal],
-    bids_count: Optional[int],
-    end_time,                              # datetime | None
-    url: str,
-    # NEW optional fields
-    detail_url: Optional[str] = None,
-    sale_type: Optional[str] = None,       # 'bin' | 'auction' | etc.
-    roi_estimate: Optional[float | int | Decimal] = None,
-    max_bid: Optional[float | int | Decimal] = None,
-    notes: Optional[str] = None,
-    source_id: Optional[int] = None,
-    model_key: Optional[str] = None,
-    time_left_s: Optional[int] = None,
-    status: Optional[str] = "live",
+        *,
+        source: str,
+        external_id: str,
+        title: str,
+        price_current: Optional[float | int | Decimal],
+        bids_count: Optional[int],
+        end_time,  # datetime | None
+        url: str,
+        # NEW optional fields
+        detail_url: Optional[str] = None,
+        sale_type: Optional[str] = None,  # 'bin' | 'auction' | etc.
+        roi_estimate: Optional[float | int | Decimal] = None,
+        max_bid: Optional[float | int | Decimal] = None,
+        notes: Optional[str] = None,
+        source_id: Optional[int] = None,
+        model_key: Optional[str] = None,
+        time_left_s: Optional[int] = None,
+        status: Optional[str] = "live",
 ):
     """
     Idempotent upsert for auction_listings.

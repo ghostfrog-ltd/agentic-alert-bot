@@ -1,23 +1,47 @@
 # agent/loops/heartbeat.py
+from __future__ import annotations
+
+import os, time, random
 from datetime import datetime, timedelta, timezone
-import time
+
+from dotenv import load_dotenv
+load_dotenv()  # ensure all modules see .env values
 
 from agent.actions.scrape_sources import run as run_scrape
 from agent.actions.close_auctions import tick as close_tick
 from agent.actions.scan_ending_soon import run as run_scan
-from agent.state import should_scrape_now
 from infrastructure.utils.logger import get_logger
-from infrastructure.db.schema import compute_daily_comps  # <- add this if you implemented it
 
 logger = get_logger(__name__)
 
+# compute_daily_comps may not exist on some branches — make optional
+try:
+    from infrastructure.db.schema import compute_daily_comps
+except Exception:
+    compute_daily_comps = None
+
+# -----------------------------
+# ENV KNOBS (safe defaults)
+# -----------------------------
+SLEEP_BASE_S = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
+SLEEP_JITTER = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
+REFRESH_HRS  = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
+
 _last_comps_at = None
 
+
+def _sleep_with_jitter():
+    time.sleep(SLEEP_BASE_S + random.uniform(0, SLEEP_JITTER))
+
+
 def _maybe_refresh_comps():
+    if not compute_daily_comps:
+        return
+
     global _last_comps_at
     now = datetime.now(timezone.utc)
-    # refresh at most every 6h (cheap) — or schedule nightly if you prefer
-    if _last_comps_at is None or (now - _last_comps_at) > timedelta(hours=6):
+
+    if _last_comps_at is None or (now - _last_comps_at) > timedelta(hours=REFRESH_HRS):
         try:
             compute_daily_comps()
             _last_comps_at = now
@@ -25,9 +49,19 @@ def _maybe_refresh_comps():
         except Exception as e:
             logger.error(f"[Heartbeat] comps refresh failed: {e}")
 
+
+def _should_scrape_safe() -> bool:
+    try:
+        from agent.state import should_scrape_now
+        return bool(should_scrape_now())
+    except Exception as e:
+        logger.error(f"[Heartbeat] should_scrape_now failed: {e}")
+        return False
+
+
 def tick():
     # 1) Scrape (respect your should_scrape_now gate)
-    if should_scrape_now():
+    if _should_scrape_safe():
         try:
             run_scrape()
         except Exception as e:
@@ -48,4 +82,4 @@ def tick():
     except Exception as e:
         logger.error(f"[Heartbeat] scan run failed: {e}")
 
-    time.sleep(5)
+    _sleep_with_jitter()

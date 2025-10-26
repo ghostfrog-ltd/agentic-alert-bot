@@ -6,6 +6,7 @@ from typing import Optional, Tuple, List
 
 connection = db_connection.connection
 
+
 # --- SELECTS
 
 def get_open_auctions(now: datetime) -> list[dict]:
@@ -19,6 +20,7 @@ def get_open_auctions(now: datetime) -> list[dict]:
         rows = cur.fetchall()
         cols = [c.name for c in cur.description]
     return [dict(zip(cols, r)) for r in rows]
+
 
 def get_open_auctions_ending_before(now: datetime) -> list[dict]:
     sql = """
@@ -34,6 +36,7 @@ def get_open_auctions_ending_before(now: datetime) -> list[dict]:
         cols = [c.name for c in cur.description]
     return [dict(zip(cols, r)) for r in rows]
 
+
 def get_recent_max_price(auction_id: int, window_minutes: int = 10) -> Optional[float]:
     sql = """
     SELECT MAX(price) FROM price_history
@@ -43,6 +46,7 @@ def get_recent_max_price(auction_id: int, window_minutes: int = 10) -> Optional[
         cur.execute(sql, (auction_id, window_minutes))
         (max_price,) = cur.fetchone()
     return max_price
+
 
 # --- UPDATES
 
@@ -55,12 +59,13 @@ def mark_status(auction_id: int, status: str):
         """, (status, auction_id))
     connection.commit()
 
+
 def finalize_auction(
-    auction_id: int,
-    final_price: Optional[float],
-    final_price_confidence: Optional[str] = None,
-    status: str = 'ENDED_CONFIRMED',
-    sale_type: Optional[str] = None
+        auction_id: int,
+        final_price: Optional[float],
+        final_price_confidence: Optional[str] = None,
+        status: str = 'ENDED_CONFIRMED',
+        sale_type: Optional[str] = None
 ):
     with connection.cursor() as cur:
         cur.execute("""
@@ -73,6 +78,7 @@ def finalize_auction(
         """, (status, final_price, final_price_confidence, sale_type, auction_id))
     connection.commit()
 
+
 def touch_last_seen(auction_id: int):
     with connection.cursor() as cur:
         cur.execute("""
@@ -81,6 +87,7 @@ def touch_last_seen(auction_id: int):
              WHERE id = %s
         """, (auction_id,))
     connection.commit()
+
 
 def create_sources():
     cursor = connection.cursor()
@@ -430,63 +437,200 @@ def create_auction_tables():
     print("Auction tables created or already exist.")
 
 
-def upsert_auction_listing(
-        source: str,                 # <-- keep
+from typing import Optional, Dict, Any
+from statistics import median
+from decimal import Decimal
+from psycopg2.extras import RealDictCursor
+
+
+# --- existing: connection, etc. ---
+
+def append_price_history(external_id: str, price: float | int | Decimal, bids_count: Optional[int]):
+    conn = connection
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO price_history (listing_external_id, price, bids_count) VALUES (%s,%s,%s)",
+            (external_id, price, bids_count)
+        )
+
+
+def mark_listing_seen(
+        external_id: str,
+        price_current: float | int | Decimal,
+        bids_count: Optional[int],
+        end_time,  # datetime or None
+        time_left_s: Optional[int],
+        model_key: Optional[str] = None,
+        status: Optional[str] = None,
+        final_price: Optional[float | int | Decimal] = None
+):
+    """
+    Update live listing snapshot + first_seen/last_seen.
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        cur.execute("""
+            UPDATE auction_listings
+               SET price_current = COALESCE(%s, price_current),
+                   bids_count     = COALESCE(%s, bids_count),
+                   end_time       = COALESCE(%s, end_time),
+                   time_left_s    = COALESCE(%s, time_left_s),
+                   model_key      = COALESCE(%s, model_key),
+                   status         = COALESCE(%s, status),
+                   final_price    = COALESCE(%s, final_price),
+                   last_seen      = CURRENT_TIMESTAMP
+             WHERE external_id = %s
+        """, (price_current, bids_count, end_time, time_left_s, model_key, status, final_price, external_id))
+
+
+def insert_or_ignore_listing(
+        source: str,
         external_id: str,
         title: str,
-        price_current: int,
-        bids_count: int,
-        end_time,
         url: str,
-        detail_url: str | None = None,   # <-- NEW
-        sale_type: str | None = None,    # <-- NEW
-        roi_estimate: float = None,
-        max_bid: int = None,
-        notes: str = None,
-        source_id: int | None = None
+        price_current: Optional[float],
+        bids_count: Optional[int],
+        end_time,
+        model_key: Optional[str],
 ):
+    """
+    Idempotent insert for new live listings (first_seen).
+    """
     conn = connection
-    cur = conn.cursor()
-    try:
+    with conn, conn.cursor() as cur:
         cur.execute("""
+            INSERT INTO auction_listings (source, external_id, title, url, price_current, bids_count, end_time, model_key, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'live')
+            ON CONFLICT (external_id) DO NOTHING
+        """, (source, external_id, title, url, price_current, bids_count, end_time, model_key))
+
+
+def record_alert(external_id: str, snipe_score: float, max_bid: float):
+    conn = connection
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO alerts (listing_external_id, snipe_score, max_bid) VALUES (%s,%s,%s)",
+            (external_id, snipe_score, max_bid)
+        )
+
+
+def latest_comps_map() -> Dict[str, Dict[str, Any]]:
+    """
+    Returns { model_key: {median_final_price, mean_final_price, samples} } for latest computed_at per model.
+    """
+    conn = connection
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("""
+            WITH lc AS (
+              SELECT DISTINCT ON (model_key) model_key, median_final_price, mean_final_price, samples, computed_at
+              FROM comps
+              ORDER BY model_key, computed_at DESC
+            )
+            SELECT * FROM lc
+        """)
+        rows = cur.fetchall()
+        return {r["model_key"]: r for r in rows}
+
+
+def compute_daily_comps():
+    """
+    Simple roll-up using auction_listings where status='sold' and final_price is not null.
+    Run nightly.
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO comps (model_key, median_final_price, mean_final_price, samples)
+            SELECT model_key,
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY final_price)::numeric AS median_final_price,
+                   AVG(final_price)::numeric AS mean_final_price,
+                   COUNT(*)::int AS samples
+            FROM auction_listings
+            WHERE status = 'sold' AND final_price IS NOT NULL AND model_key IS NOT NULL
+            GROUP BY model_key
+        """)
+
+
+def upsert_auction_listing(
+    *,
+    source: str,
+    external_id: str,
+    title: str,
+    price_current: Optional[float | int | Decimal],
+    bids_count: Optional[int],
+    end_time,                              # datetime | None
+    url: str,
+    # NEW optional fields
+    detail_url: Optional[str] = None,
+    sale_type: Optional[str] = None,       # 'bin' | 'auction' | etc.
+    roi_estimate: Optional[float | int | Decimal] = None,
+    max_bid: Optional[float | int | Decimal] = None,
+    notes: Optional[str] = None,
+    source_id: Optional[int] = None,
+    model_key: Optional[str] = None,
+    time_left_s: Optional[int] = None,
+    status: Optional[str] = "live",
+):
+    """
+    Idempotent upsert for auction_listings.
+    - Inserts on first sight, stamping first_seen/last_seen.
+    - On conflict(external_id) updates ONLY with non-null values and refreshes last_seen.
+    - Safe to call repeatedly from adapters.
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        cur.execute(
+            """
             INSERT INTO auction_listings (
                 source, external_id, title, price_current, bids_count, end_time,
-                url, detail_url, sale_type,
-                fetched_at, roi_estimate, max_bid, notes, last_seen, source_id
+                url, detail_url, sale_type, roi_estimate, max_bid, notes,
+                source_id, model_key, time_left_s, status, first_seen, last_seen
             )
             VALUES (
-                %s, %s, %s, %s, %s, %s,
-                %s, %s, %s,
-                CURRENT_TIMESTAMP, %s, %s, %s, CURRENT_TIMESTAMP, %s
+                %(source)s, %(external_id)s, %(title)s, %(price_current)s, %(bids_count)s, %(end_time)s,
+                %(url)s, %(detail_url)s, %(sale_type)s, %(roi_estimate)s, %(max_bid)s, %(notes)s,
+                %(source_id)s, %(model_key)s, %(time_left_s)s, %(status)s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             )
             ON CONFLICT (external_id) DO UPDATE
             SET
-                source        = EXCLUDED.source,
-                title         = EXCLUDED.title,
-                price_current = EXCLUDED.price_current,
-                bids_count    = EXCLUDED.bids_count,
-                end_time      = EXCLUDED.end_time,
-                url           = EXCLUDED.url,
-                -- preserve existing non-null detail_url / sale_type if caller passes None
-                detail_url    = COALESCE(EXCLUDED.detail_url, auction_listings.detail_url),
-                sale_type     = COALESCE(EXCLUDED.sale_type,  auction_listings.sale_type),
-                fetched_at    = CURRENT_TIMESTAMP,
-                roi_estimate  = EXCLUDED.roi_estimate,
-                max_bid       = EXCLUDED.max_bid,
-                notes         = EXCLUDED.notes,
-                last_seen     = CURRENT_TIMESTAMP,
-                source_id     = EXCLUDED.source_id;
-        """, (
-            source, external_id, title, price_current, bids_count, end_time,
-            url, detail_url, sale_type,
-            roi_estimate, max_bid, notes, source_id
-        ))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
+                -- prefer new non-null values; otherwise keep existing
+                source        = COALESCE(EXCLUDED.source,        auction_listings.source),
+                title         = COALESCE(EXCLUDED.title,         auction_listings.title),
+                price_current = COALESCE(EXCLUDED.price_current, auction_listings.price_current),
+                bids_count    = COALESCE(EXCLUDED.bids_count,    auction_listings.bids_count),
+                end_time      = COALESCE(EXCLUDED.end_time,      auction_listings.end_time),
+                url           = COALESCE(EXCLUDED.url,           auction_listings.url),
+                detail_url    = COALESCE(EXCLUDED.detail_url,    auction_listings.detail_url),
+                sale_type     = COALESCE(EXCLUDED.sale_type,     auction_listings.sale_type),
+                roi_estimate  = COALESCE(EXCLUDED.roi_estimate,  auction_listings.roi_estimate),
+                max_bid       = COALESCE(EXCLUDED.max_bid,       auction_listings.max_bid),
+                notes         = COALESCE(EXCLUDED.notes,         auction_listings.notes),
+                source_id     = COALESCE(EXCLUDED.source_id,     auction_listings.source_id),
+                model_key     = COALESCE(EXCLUDED.model_key,     auction_listings.model_key),
+                time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
+                status        = COALESCE(EXCLUDED.status,        auction_listings.status),
+                last_seen     = CURRENT_TIMESTAMP
+            """
+            ,
+            {
+                "source": source,
+                "external_id": external_id,
+                "title": title,
+                "price_current": price_current,
+                "bids_count": bids_count,
+                "end_time": end_time,
+                "url": url,
+                "detail_url": detail_url,
+                "sale_type": sale_type,
+                "roi_estimate": roi_estimate,
+                "max_bid": max_bid,
+                "notes": notes,
+                "source_id": source_id,
+                "model_key": model_key,
+                "time_left_s": time_left_s,
+                "status": status,
+            },
+        )
 
 
 def insert_price_history(auction_id: int, price: int, bids_count: int):

@@ -1,11 +1,18 @@
+# infrastructure/scraper/adapters/niche/ebay/motomine.py
+
 import json
 import random
 import re
 import time
 from urllib.parse import urljoin, urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
+import os
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from http.cookiejar import LWPCookieJar
+import requests.exceptions as req_exc
 
 from core.contracts import AuctionAdapter
 from infrastructure.db.schema import (
@@ -27,22 +34,30 @@ STORE_URL = "https://www.ebay.co.uk/str/{seller}?_pgn={page}&_ipg=240"
 SELLER_ITEMS = "https://www.ebay.co.uk/sch/{seller}/m.html?_ipg=240&_pgn={page}"
 DESKTOP_SRP = "https://www.ebay.co.uk/sch/i.html?LH_SpecificSeller=1&_sasl={seller}&_ipg=240&_pgn={page}&rt=nc"
 
+COOKIE_PATH = "/tmp/ebay_motomine_cookies.lwp"
+
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/118.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-GB,en;q=0.9",
-    "Referer": "https://www.ebay.co.uk/",
     "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Referer": "https://www.ebay.co.uk/",
 }
 
 PRICE_RX = re.compile(r"£?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)")
 BIDS_RX = re.compile(r"(\d+)\s+bids?", re.IGNORECASE)
 ENDDATE_RX = re.compile(r'"endDate"\s*:\s*"([^"]+)"')
 ITEM_ID_RX = re.compile(r"/itm/(?:[^/]+/)?(?P<id>\d{9,15})(?:[/?#]|$)")
+INTERSTITIAL_TITLE_RX = re.compile(r"checking your browser", re.I)
 
 # ------------------------------------
 # SOURCE RESOLUTION (cached)
@@ -51,15 +66,11 @@ _SOURCE_NAME: str | None = None
 _SOURCE_ID: int | None = None
 
 def _resolve_source(domain_hint: str) -> tuple[str, int | None]:
-    """
-    Resolve sources.name (TEXT NOT NULL) and optional sources.id.
-    Tries a few reasonable keys, caches the first success.
-    """
     global _SOURCE_NAME, _SOURCE_ID
     if _SOURCE_NAME is not None:
         return _SOURCE_NAME, _SOURCE_ID
 
-    candidates = [domain_hint, "ebay-uk", "ebay", "motomine", SELLER]
+    candidates = [domain_hint, "ebay-uk", "ebay", "motomine", "motomind", SELLER]
     for key in candidates:
         try:
             sname = resolve_source_field(key, "name")
@@ -77,30 +88,84 @@ def _resolve_source(domain_hint: str) -> tuple[str, int | None]:
     return _SOURCE_NAME, _SOURCE_ID
 
 # ------------------------------------
-# HELPERS
+# SESSION & NETWORK HELPERS
 # ------------------------------------
+def _build_session() -> requests.Session:
+    s = requests.Session()
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        backoff_factor=0.8,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    s.headers.update(HEADERS)
 
-def _get(url: str, session: requests.Session, timeout: int = 30, retries: int = 2, backoff: float = 0.8):
+    try:
+        cj = LWPCookieJar(COOKIE_PATH)
+        if os.path.exists(COOKIE_PATH):
+            cj.load(ignore_discard=True, ignore_expires=True)
+        s.cookies = cj
+    except Exception:
+        pass
+    return s
+
+def _save_cookies(session: requests.Session):
+    try:
+        if isinstance(session.cookies, LWPCookieJar):
+            session.cookies.save(ignore_discard=True, ignore_expires=True)
+    except Exception:
+        pass
+
+def _looks_like_interstitial(soup: BeautifulSoup, html: str) -> bool:
+    title = (soup.title.string.strip() if soup.title and soup.title.string else "").lower()
+    body = html.lower()
+    return (
+        INTERSTITIAL_TITLE_RX.search(title) is not None
+        or "security measure" in title
+        or "cf-chl" in body
+        or "please verify you are a human" in body
+        or ("robot" in body and len(html) < 120000)
+    )
+
+def _robust_get(url: str, session: requests.Session, base_referer: str | None = None, tries: int = 4, timeout: int = 60):
     last = None
-    for i in range(retries + 1):
+    for i in range(tries):
         try:
+            if base_referer:
+                session.headers["Referer"] = base_referer
             r = session.get(url, timeout=timeout)
-            if r.status_code in (429, 403, 502, 503, 520, 521, 522):
-                raise RuntimeError(f"status {r.status_code}")
-            return r
+            html = r.text
+            soup = BeautifulSoup(html, "lxml")
+            if not _looks_like_interstitial(soup, html):
+                return r
+            time.sleep(2.0 + i * 2.0 + random.uniform(0, 1.0))
+            try:
+                session.get("https://www.ebay.co.uk/", timeout=15)
+            except Exception:
+                pass
+        except (req_exc.ChunkedEncodingError, req_exc.ContentDecodingError, req_exc.ConnectionError, req_exc.ReadTimeout) as e:
+            last = e
+            logger.warning(f"[net] {_strip_params(url)} -> transient error: {e} (try {i+1}/{tries})")
+            time.sleep(1.0 + i * 1.5 + random.uniform(0, 1.0))
+            continue
         except Exception as e:
             last = e
-            if i < retries:
-                time.sleep(backoff * (1.5 ** i) + random.uniform(0, 0.4))
-            else:
-                raise RuntimeError(f"GET {url} failed after {retries+1} attempts: {last}") from last
+            logger.warning(f"[net] {_strip_params(url)} -> error: {e} (try {i+1}/{tries})")
+            time.sleep(1.0 + i * 1.5 + random.uniform(0, 1.0))
+            continue
+    logger.error(f"[net] {_strip_params(url)} -> giving up after {tries} tries; last={last}")
+    return None
 
-def _is_interstitial(soup: BeautifulSoup, html: str) -> bool:
-    title = (soup.title.string.strip() if soup.title and soup.title.string else "").lower()
-    if "security measure" in title:
-        return True
-    return ("robot" in html.lower() and len(html) < 120000)
-
+# ------------------------------------
+# HTML HELPERS
+# ------------------------------------
 def _canonical_item_url(item_id: str) -> str:
     return f"https://www.ebay.co.uk/itm/{item_id}"
 
@@ -122,7 +187,6 @@ def _extract_item_id_from_href(href: str) -> str | None:
     return None
 
 def _extract_listing_urls_from_doc(soup: BeautifulSoup, base_url: str) -> list[str]:
-    """Scan all anchors for '/itm/', extract numeric ID, and build canonical UK URLs. Skip placeholder IDs."""
     urls, seen = [], set()
     for a in soup.find_all("a", href=True):
         href = (a["href"] or "").strip()
@@ -176,22 +240,27 @@ def _price_from_jsonld(soup: BeautifulSoup):
 def _extract_price_from_item_page(soup: BeautifulSoup, html: str):
     j = _price_from_jsonld(soup)
     if j:
-        return j  # (price, currency)
+        return j
     for sel in [
+        "div[data-testid='x-price-primary'] span.ux-textspans",
+        ".x-price-primary .ux-textspans",
         "#prcIsum",
-        "#prcIsum_bidPrice",
-        ".x-price-primary",
-        ".notranslate",
+        "#mm-saleDscPrc",
         "span[itemprop='price']",
-        "div[data-testid='x-price-primary'] span",
+        "span[data-testid='x-bin-price']",
+        ".vi-price span",  # loose fallback on classic layout
     ]:
         el = soup.select_one(sel)
         if el:
-            txt = el.get_text(" ", strip=True)
-            if txt:
-                p = _extract_price_from_text(txt)
-                if p is not None:
-                    return p, "GBP"
+            p = _extract_price_from_text(el.get_text(" ", strip=True))
+            if p is not None:
+                return p, "GBP"
+    og = soup.select_one('meta[property="og:price:amount"]')
+    if og and og.get("content"):
+        try:
+            return int(round(float(og["content"]))), "GBP"
+        except Exception:
+            pass
     p = _extract_price_from_text(html)
     if p is not None:
         return p, "GBP"
@@ -240,7 +309,7 @@ def _extract_end_time(soup: BeautifulSoup, html: str) -> datetime | None:
             pass
     return None
 
-def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | None = None) -> str:
+def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | None = None) -> str | None:
     m = ITEM_ID_RX.search(url)
     if m:
         return m.group("id")
@@ -263,24 +332,23 @@ def _extract_item_id(url: str, soup: BeautifulSoup | None = None, html: str | No
     v = (q.get("item") or [None])[0]
     if v and v.isdigit() and 9 <= len(v) <= 15:
         return v
-    return f"hash-{abs(hash(url))}"
+    # do NOT fabricate a hash id; skip instead
+    return None
 
-def _infer_sale_type(soup: BeautifulSoup, page_text: str) -> str | None:
+def _infer_sale_type(_soup: BeautifulSoup, page_text: str) -> str | None:
     t = page_text.lower()
-    # weak heuristics; good enough to categorize for analytics
-    if "best offer" in t:
-        return "best_offer"
-    if "buy it now" in t or "buy it now price" in t:
-        return "bin"
-    # if it shows bid/bids anywhere, treat as auction
+    # Prefer auction if bids are present
     if " bid" in t or " bids" in t:
         return "auction"
+    if "buy it now" in t or "buy it now price" in t:
+        return "bin"
+    if "best offer" in t:
+        return "best_offer"
     return None
 
 # ------------------------------------
 # ADAPTER
 # ------------------------------------
-
 class Adapter(AuctionAdapter):
     DOMAIN = "motomine"
 
@@ -294,17 +362,7 @@ class Adapter(AuctionAdapter):
             logger.info(f"[{self.DOMAIN}] throttle: skip (interval={meta.interval_s}s, next_due={next_due})")
             return []
 
-        session = requests.Session()
-        session.headers.update(HEADERS)
-
-        # Warm up
-        try:
-            session.get("https://www.ebay.co.uk/", timeout=15)
-            session.get(f"https://www.ebay.co.uk/usr/{SELLER}", timeout=15)
-            time.sleep(random.uniform(0.8, 1.6))
-        except Exception:
-            pass
-
+        session = _build_session()
         page = 1
         consecutive_empty = 0
         all_urls: list[str] = []
@@ -312,38 +370,28 @@ class Adapter(AuctionAdapter):
         while True:
             urls_this: list[str] = []
 
-            # 1) Storefront
+            # Storefront
             store_url = STORE_URL.format(seller=SELLER, page=page)
-            try:
-                rs = _get(store_url, session, timeout=20, retries=2)
-                ss = BeautifulSoup(rs.text, "lxml")
-                urls_this = _extract_listing_urls_from_doc(ss, store_url)
-            except Exception as e:
-                logger.warning(f"[{self.DOMAIN}] store page failed p{page}: {e}")
+            r = _robust_get(store_url, session, base_referer="https://www.ebay.co.uk/")
+            if r:
+                soup = BeautifulSoup(r.text, "lxml")
+                urls_this = _extract_listing_urls_from_doc(soup, store_url)
 
-            # 2) Seller items
+            # Seller items
             if not urls_this:
                 seller_url = SELLER_ITEMS.format(seller=SELLER, page=page)
-                try:
-                    r = _get(seller_url, session, timeout=20, retries=2)
-                    logger.info(f"[{self.DOMAIN}] GET {seller_url} -> {r.status_code} {len(r.text)} bytes")
+                r = _robust_get(seller_url, session, base_referer="https://www.ebay.co.uk/")
+                if r:
                     soup = BeautifulSoup(r.text, "lxml")
                     urls_this = _extract_listing_urls_from_doc(soup, seller_url)
-                except Exception as e:
-                    logger.warning(f"[{self.DOMAIN}] seller items page failed p{page}: {e}")
 
-            # 3) SRP fallback
+            # SRP fallback
             if not urls_this:
                 desktop_url = DESKTOP_SRP.format(seller=SELLER, page=page)
-                try:
-                    rd = _get(desktop_url, session, timeout=20, retries=2)
-                    logger.info(f"[{self.DOMAIN}] GET {desktop_url} -> {rd.status_code} {len(rd.text)} bytes")
-                    sd = BeautifulSoup(rd.text, "lxml")
-                    interstitial = _is_interstitial(sd, rd.text)
-                    logger.info(f"[{self.DOMAIN}] p{page} interstitial?={interstitial} html_len={len(rd.text)} (SRP)")
-                    urls_this = _extract_listing_urls_from_doc(sd, desktop_url)
-                except Exception as e:
-                    logger.warning(f"[{self.DOMAIN}] desktop SRP failed p{page}: {e}")
+                r = _robust_get(desktop_url, session, base_referer="https://www.ebay.co.uk/")
+                if r:
+                    soup = BeautifulSoup(r.text, "lxml")
+                    urls_this = _extract_listing_urls_from_doc(soup, desktop_url)
 
             if not urls_this:
                 consecutive_empty += 1
@@ -353,90 +401,79 @@ class Adapter(AuctionAdapter):
                     if u not in all_urls:
                         all_urls.append(u)
 
-            if consecutive_empty >= 2:
+            if consecutive_empty >= 2 or page > 10:
                 logger.info(f"[{self.DOMAIN}] no more results after page {page}; stopping.")
                 break
 
             page += 1
-            if page > 20:
-                break
+            time.sleep(random.uniform(2.5, 5.0))
+            mark_scraped(meta)  # keep per-page backoff marks
 
-            time.sleep(random.uniform(1.5, 3.0))
-            mark_scraped(meta)  # record progress so gate knows we ran
-
+        _save_cookies(session)
         return all_urls
 
     def parse_auction(self, url: str) -> bool:
-        """Fetch + parse the auction page and upsert into DB. Return True on success."""
-        session = requests.Session()
-        session.headers.update(HEADERS)
+        session = _build_session()
         try:
-            r = _get(url, session, timeout=30, retries=2)
-            if r.status_code != 200:
-                logger.warning(f"[{self.DOMAIN}] GET {url} -> {r.status_code}")
-                return False
+            fetch_url = url if "nordt=true" in url else (url.split("?")[0] + "?nordt=true")
+            r = _robust_get(fetch_url, session, base_referer="https://www.ebay.co.uk/", timeout=60)
+            if not r:
+                r = _robust_get(url, session, base_referer="https://www.ebay.co.uk/", timeout=60)
+                if not r:
+                    logger.warning(f"[{self.DOMAIN}] drop item (no response): {url}")
+                    return False
 
             html = r.text
             soup = BeautifulSoup(html, "lxml")
 
-            # Title
+            if _looks_like_interstitial(soup, html):
+                logger.warning(f"[{self.DOMAIN}] interstitial on item, skip: {url}")
+                return False
+
             h1 = soup.select_one("#itemTitle") or soup.select_one("h1")
             title = (
                 h1.get_text(" ", strip=True)
                 if h1 else (soup.title.get_text(" ", strip=True) if soup.title else "")
             )
             title = title.replace("Details about  ", "").strip() or ""
-
-            # Skip CF/interstitial pages (don't poison DB with that title)
-            if title.lower().startswith("checking your browser"):
+            if not title or title.lower().startswith("checking your browser"):
                 return False
 
-            # Price
-            pc = _extract_price_from_item_page(soup, html)
-            price_current = pc[0] if isinstance(pc, tuple) else pc
+            price_tuple = _extract_price_from_item_page(soup, html)
+            price_current = price_tuple[0] if isinstance(price_tuple, tuple) else price_tuple
             try:
                 price_current = int(price_current or 0)
             except Exception:
                 price_current = 0
 
-            # Required fields
             external_id = _extract_item_id(url, soup, html)
+            if not external_id:
+                logger.warning(f"[{self.DOMAIN}] no external_id, skip: {url}")
+                return False
+
             bids_count = int(_extract_bids_count(soup, html) or 0)
             end_time = _extract_end_time(soup, html)
 
-            # Clean values
-            title = (title or "").strip()
-            if len(title) > 255:
-                title = title[:255]
-
-            url_clean = _strip_params(url)
-            if len(url_clean) > 1024:
-                url_clean = url_clean[:1024]
-
-            # NEW: canonical detail URL (stable even after ending)
+            title = (title or "").strip()[:255]
+            url_clean = _strip_params(url)[:1024]
             detail_url = _canonical_item_url(external_id)
-
-            # NEW: sale type hint (auction / bin / best_offer)
             sale_type = _infer_sale_type(soup, html)
-
-            # Resolve source (from sources table)
             source_name, source_id = _resolve_source(self.DOMAIN)
 
-            # Upsert (ensure your DB function accepts these extras & sets last_seen_at=NOW())
             upsert_auction_listing(
-                source=source_name,           # TEXT NOT NULL
-                external_id=external_id,
+                source=source_name,                # TEXT NOT NULL
+                external_id=external_id,           # eBay item id
                 title=title,
                 price_current=price_current,
                 bids_count=bids_count,
-                end_time=end_time,            # can be None
-                url=url_clean,                # list page (cleaned)
-                detail_url=detail_url,        # NEW: critical for final close/reconcile
-                sale_type=sale_type,          # NEW: category hint
+                end_time=end_time,                 # may be None
+                url=url_clean,                     # listing-page URL (cleaned)
+                detail_url=detail_url,             # canonical detail URL
+                sale_type=sale_type,               # 'auction' | 'bin' | 'best_offer' | None
                 roi_estimate=None,
                 max_bid=None,
                 notes=None,
-                source_id=source_id,          # optional FK to sources.id
+                source_id=source_id,               # optional FK to sources.id
             )
 
             logger.info(
@@ -447,3 +484,5 @@ class Adapter(AuctionAdapter):
         except Exception as e:
             logger.warning(f"[{self.DOMAIN}] parse failed {url}: {e}")
             return False
+        finally:
+            _save_cookies(session)

@@ -9,7 +9,7 @@ from infrastructure.db import schema
 from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt, bitcoinmagazine
 
 # Auction adapters
-from infrastructure.scraper.adapters.niche.ebay import motomine
+from infrastructure.scraper.adapters.niche.ebay import motomine, consoles
 
 logger = get_logger(__name__)
 
@@ -28,6 +28,7 @@ news_registry = AdapterRegistry(
 auction_registry = AuctionRegistry(
     adapters=[
         motomine.Adapter(),
+        consoles.Adapter(),
     ]
 )
 

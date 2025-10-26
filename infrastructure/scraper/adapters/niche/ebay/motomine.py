@@ -333,7 +333,7 @@ class Adapter(AuctionAdapter):
                 except Exception as e:
                     logger.warning(f"[{self.DOMAIN}] desktop SRP failed p{page}: {e}")
 
-            logger.info(f"[{self.DOMAIN}] page {page}: found {len(urls_this)} item URLs")
+            #logger.info(f"[{self.DOMAIN}] page {page}: found {len(urls_this)} item URLs")
 
             if not urls_this:
                 consecutive_empty += 1
@@ -349,7 +349,7 @@ class Adapter(AuctionAdapter):
 
             page += 1
             if page > 20:
-                logger.warning(f"[{self.DOMAIN}] pagination cap (20) reached; stopping.")
+                #logger.warning(f"[{self.DOMAIN}] pagination cap (20) reached; stopping.")
                 break
 
             time.sleep(random.uniform(1.5, 3.0))

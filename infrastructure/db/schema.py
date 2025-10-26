@@ -2,6 +2,8 @@ import psycopg2
 from infrastructure.utils import db_connection
 from dataclasses import asdict
 from typing import Optional
+from datetime import datetime
+from typing import Optional
 
 connection = db_connection.connection
 
@@ -29,6 +31,38 @@ def add_source(name, type_, base_url, enabled=True):
     ON CONFLICT (name) DO NOTHING
     """
     cursor.execute(q, (name, type_, base_url, enabled))
+    connection.commit()
+
+
+def get_source_fields(source_key: str) -> dict:
+    """
+    Return a row dict for sources.* given a key you already use with resolve_source_field/resolve_source_id.
+    """
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT id, name, scrape_interval_seconds, last_scraped_at
+            FROM sources
+            WHERE name = %s OR domain = %s
+            ORDER BY name = %s DESC, domain = %s DESC
+            LIMIT 1
+        """, (source_key, source_key, source_key, source_key))
+        row = cur.fetchone()
+    if not row:
+        return {}
+    return {
+        "id": row[0],
+        "name": row[1],
+        "scrape_interval_seconds": row[2],
+        "last_scraped_at": row[3],
+    }
+
+
+def update_source_last_scraped(source_id: int, when: Optional[datetime] = None) -> None:
+    with connection.cursor() as cur:
+        cur.execute(
+            "UPDATE sources SET last_scraped_at = %s WHERE id = %s",
+            (when or datetime.utcnow(), source_id),
+        )
     connection.commit()
 
 

@@ -1,24 +1,16 @@
-# infrastructure/scraper/adapters/niche/ebay/motomine.py
-
 import json
 import random
 import re
 import time
-from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse, parse_qs
-
+from datetime import datetime, timezone, timedelta
 import requests
 from bs4 import BeautifulSoup
-
 from core.contracts import AuctionAdapter
-from infrastructure.db.schema import (
-    upsert_auction_listing,
-    resolve_source_id,
-    resolve_source_field,   # we'll read sources.name from here
-)
+from infrastructure.db.schema import (  upsert_auction_listing, resolve_source_id, resolve_source_field, )
 from infrastructure.utils.logger import get_logger
-
 logger = get_logger(__name__)
+from infrastructure.utils.scrape_gate import gate_scrape, mark_scraped
 
 # ------------------------------------
 # CONFIG
@@ -280,6 +272,12 @@ class Adapter(AuctionAdapter):
         return ("ebay.co.uk" in url) or ("motomine.co.uk" in url)
 
     def fetch_listing_urls(self) -> list[str]:
+        allowed, meta = gate_scrape(self.DOMAIN, prefer_interval_s=None, pre_mark=False)
+        if not allowed:
+            next_due = meta.next_due_at.isoformat() if meta.next_due_at else "unknown"
+            logger.info(f"[{self.DOMAIN}] throttle: skip (interval={meta.interval_s}s, next_due={next_due})")
+            return []
+
         session = requests.Session()
         session.headers.update(HEADERS)
 
@@ -355,6 +353,8 @@ class Adapter(AuctionAdapter):
                 break
 
             time.sleep(random.uniform(1.5, 3.0))
+
+            mark_scraped(meta)
 
         return all_urls
 

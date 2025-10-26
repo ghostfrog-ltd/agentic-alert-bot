@@ -1,19 +1,17 @@
 import re
 import random, time
-from datetime import datetime
-
 from bs4 import BeautifulSoup
-
-from infrastructure.utils.http import get  # our HTTP helper
+from infrastructure.utils.http import get
 from core.contracts import SiteAdapter, Article
 from infrastructure.db.schema import resolve_source_id, resolve_source_niche, resolve_source_field
 from infrastructure.utils.text import extract_content, classify_sentiment, is_footer_only
-from infrastructure.utils.url_helpers import (
-    is_article_url,
-    canonical_from_html,
-    stable_hash,
-    normalize_url,
-)
+from infrastructure.utils.url_helpers import (canonical_from_html, stable_hash, normalize_url,)
+from email.utils import parsedate_to_datetime
+from datetime import datetime
+from infrastructure.utils.logger import get_logger
+from infrastructure.utils.rss_helpers import fetch_rss_listing_urls
+
+logger = get_logger(__name__)
 
 HEADERS = {
     "User-Agent": (
@@ -34,30 +32,16 @@ class Adapter(SiteAdapter):
         return self.DOMAIN in url
 
     def fetch_listing_urls(self):
-        r = get(self.RSS, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "xml")
-
-        seen = set()
-        for item in soup.find_all("item"):
-            link_tag = item.find("link")
-            href = link_tag.get_text(strip=True) if link_tag else None
-            if not href:
-                continue
-
-            url = normalize_url(href, base_url=self.LISTING)
-            if not url:
-                continue
-            if not is_article_url(url, {self.DOMAIN}):
-                continue
-            if url in seen:
-                continue
-            # Skip known junk paths (video pages, podcast, etc.)
-            if any(bad in url for bad in ("/videos/")):
-                continue
-
-            seen.add(url)
-            yield url
+        return fetch_rss_listing_urls(
+            source_key=self.DOMAIN,
+            rss_url=self.RSS,
+            listing_base=self.LISTING,
+            headers=HEADERS,
+            junk_paths=("/videos/", "/video/", "/podcast/", "/podcasts/"),
+            allowed_domains={self.DOMAIN, f"www.{self.DOMAIN}"},
+            prefer_interval_s=3600,
+            pre_mark=False,
+        )
 
     def parse_article(self, url: str):
         # Politeness delay
@@ -68,7 +52,7 @@ class Adapter(SiteAdapter):
         soup = BeautifulSoup(html, "lxml")
 
         # Canonical URL (keep your existing helper call style)
-        canonical_url = canonical_from_html(html, url)
+        canonical_url = canonical_from_html(html, url) or normalize_url(url) or url
 
         # Title
         title_el = soup.select_one('meta[property="og:title"]')
@@ -92,11 +76,12 @@ class Adapter(SiteAdapter):
         published_at = None
         if date_str:
             try:
-                if date_str.endswith("Z"):
-                    date_str = date_str.replace("Z", "+00:00")
-                published_at = datetime.fromisoformat(date_str)
+                published_at = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
             except Exception:
-                published_at = None
+                try:
+                    published_at = parsedate_to_datetime(date_str)
+                except Exception:
+                    published_at = None
 
         # Author
         author_el = soup.select_one('meta[name="author"]') or soup.select_one(".byline .name")
@@ -107,7 +92,9 @@ class Adapter(SiteAdapter):
         )
 
         # Tags
-        tags = [t.get_text(strip=True) for t in soup.select('a[rel~="tag"], .tags a') if t.get_text(strip=True)]
+        tags = [t.get("content", "").strip() for t in soup.select('meta[property="article:tag"]') if t.get("content")]
+        if not tags:
+            tags = [t.get_text(strip=True) for t in soup.select('a[rel~="tag"], .tags a') if t.get_text(strip=True)]
 
         # Extract content
         # ----- Content extraction -----
@@ -155,14 +142,15 @@ class Adapter(SiteAdapter):
             content = None
 
         # Sentiment
-        sentiment, _score = classify_sentiment(title if title else (summary or content))
+        text_for_sentiment = title or summary or (content[:300] if content else "")
+        sentiment, _score = classify_sentiment(text_for_sentiment)
 
         # IDs
         h = stable_hash(self.DOMAIN, canonical_url)
         source_id = resolve_source_id(self.DOMAIN)
 
         niche = resolve_source_niche(self.DOMAIN)
-        website = resolve_source_field(self.DOMAIN, 'type')
+        website = resolve_source_field(self.DOMAIN, "type") or "website"
 
         return Article(
             source_id=source_id,

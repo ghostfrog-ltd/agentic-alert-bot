@@ -6,7 +6,7 @@ from infrastructure.db import schema
 
 
 # News adapters
-from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt
+from infrastructure.scraper.adapters.niche.crypto import coindesk, cointelegraph, decrypt, bitcoinmagazine
 
 # Auction adapters
 from infrastructure.scraper.adapters.niche.ebay import motomine
@@ -19,6 +19,7 @@ news_registry = AdapterRegistry(
         coindesk.Adapter(),
         cointelegraph.Adapter(),
         decrypt.Adapter(),
+        bitcoinmagazine.Adapter(),
     ],
     repo=schema
 )
@@ -98,8 +99,9 @@ def run():
     - Runs auction scrapers and upserts auction listings.
     Returns list of news articles (auction results are written directly to DB).
     """
-    logger.info("[scrape] Starting full scrape cycle...")
-    news_results = run_news()
-    #run_auctions()
-    #logger.info("[scrape] Scrape cycle complete.")
-    return news_results
+    logger.info("[scrape] Starting full scrape cycle.")
+    run_news()
+
+    run_auctions()
+    logger.info("[scrape] Scrape cycle complete..")
+

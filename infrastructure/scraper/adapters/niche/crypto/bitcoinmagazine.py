@@ -4,7 +4,7 @@ from infrastructure.utils.http import get
 from core.contracts import SiteAdapter, Article
 from infrastructure.db.schema import resolve_source_id, resolve_source_niche, resolve_source_field
 from infrastructure.utils.text import extract_content, classify_sentiment, is_footer_only
-from infrastructure.utils.url_helpers import (canonical_from_html,stable_hash,normalize_url)
+from infrastructure.utils.url_helpers import ( canonical_from_html, stable_hash,   normalize_url,)
 from email.utils import parsedate_to_datetime
 from datetime import datetime
 from infrastructure.utils.logger import get_logger
@@ -23,9 +23,9 @@ HEADERS = {
 
 
 class Adapter(SiteAdapter):
-    DOMAIN = "coindesk.com"
-    LISTING = "https://www.coindesk.com/"
-    RSS = "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    DOMAIN = "bitcoinmagazine.com"
+    LISTING = "https://bitcoinmagazine.com/"
+    RSS = "https://bitcoinmagazine.com/feed/"
 
     def can_handle(self, url: str) -> bool:
         return self.DOMAIN in url

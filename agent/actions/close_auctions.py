@@ -1,160 +1,399 @@
+# agent/actions/close_auctions.py
+from __future__ import annotations
+
+import os
+import random
+import time
+import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin
+from typing import Any, Optional, Sequence
 
-from bs4 import BeautifulSoup
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
+from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import (
-    get_open_auctions,
-    get_open_auctions_ending_before,
-    mark_status,
-    finalize_auction,
+    connection,                         # single-threaded main-thread writes only
+    get_open_auctions_ending_before,    # read helper
     get_recent_max_price,
 )
-from infrastructure.utils.logger import get_logger
-from infrastructure.utils.http import get as http_get, head  # use our wrappers
 
 logger = get_logger(__name__)
 
-GRACE_WINDOW = timedelta(minutes=5)        # mark ENDING_SOON
-BURST_WINDOW = timedelta(minutes=3)        # high-frequency polling window
-BURST_INTERVAL_SECONDS = 12                # how often you poll in the burst
-CLOSE_DELAY = timedelta(seconds=90)        # wait after end_time for snipes/page lag
+# ===========================
+# Knobs & env flags
+# ===========================
+GRACE_WINDOW = timedelta(minutes=5)
+CLOSE_DELAY = timedelta(seconds=90)
+MAX_PER_HEARTBEAT = 30
+
+STALE_UNENDED_FALLBACK = timedelta(hours=12)
+
+PASS_BUDGET_SECONDS = float(os.getenv("CLOSE_PASS_BUDGET_S", "25"))
+CLOSE_DISABLE = os.getenv("CLOSE_DISABLE", "0") in ("1", "true", "True")
+
+# HTTP tuning
+CONNECT_TIMEOUT_S = 2.0
+READ_TIMEOUT_S = 3.0
+TOTAL_TIMEOUT = (CONNECT_TIMEOUT_S, READ_TIMEOUT_S)
+
+# 🔻 Make it gentler by default
+MAX_WORKERS = int(os.getenv("CLOSE_MAX_WORKERS", "1"))  # was "4"
+MIN_GAP_SECONDS = float(os.getenv("CLOSE_MIN_GAP_S", "0.9"))
+GLOBAL_COOLDOWN_S = float(os.getenv("CLOSE_COOLDOWN_S", "22"))
+
+PROBE_MAX_BYTES = 65536
+
+_RETRY = Retry(
+    total=1,
+    connect=1,
+    read=0,
+    status=1,
+    backoff_factor=0.2,
+    status_forcelist=(429, 500, 502, 503, 504),
+    allowed_methods=frozenset(["GET"]),
+)
+
+_SESSION = requests.Session()
+_ADAPTER = HTTPAdapter(pool_connections=32, pool_maxsize=32, max_retries=_RETRY)
+_SESSION.mount("https://", _ADAPTER)
+_SESSION.mount("http://", _ADAPTER)
+
+_COMMON_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+}
+
+END_MARKERS = (
+    "this listing has ended",
+    "bidding has ended",
+    "listing ended",
+    "item has ended",
+    "item is no longer available",
+)
+SOLD_MARKERS = ("sold", "winning bid", "winner")
+ANTI_BOT_SNIPPETS = ("to ensure this is not a bot", "/challenge?ctx", "captcha")
+
+# ===========================
+# Types
+# ===========================
+@dataclass
+class Auction:
+    id: int
+    url: str
+    end_time: Optional[datetime] = None
 
 
-# --- time helpers (normalize to aware UTC) ---
+def _as_auction(row: Any) -> Auction:
+    if isinstance(row, Auction):
+        return row
+    if isinstance(row, dict):
+        return Auction(
+            id=row.get("id") or row.get("auction_id"),
+            url=row.get("detail_url") or row.get("url"),
+            end_time=row.get("end_time"),
+        )
+    return Auction(
+        id=getattr(row, "id"),
+        url=getattr(row, "detail_url", None) or getattr(row, "url", None),
+        end_time=getattr(row, "end_time", None),
+    )
+
+
+@dataclass
+class CloseResult:
+    id: int
+    action: str
+    status: Optional[str]
+    final_price: Optional[int]
+    confidence: Optional[str] = None  # 'page' | 'history' | None
+
+# ===========================
+# Global pacing state
+# ===========================
+_last_fetch_ts: float = 0.0
+_cooldown_until: float = 0.0
+
+
+def _pacing_sleep() -> None:
+    """Respect global cooldown and min inter-request gap."""
+    global _last_fetch_ts, _cooldown_until
+    now = time.perf_counter()
+
+    # Cooldown (after anti-bot/429)
+    if now < _cooldown_until:
+        time.sleep(_cooldown_until - now)
+        now = time.perf_counter()
+
+    # Min gap between requests
+    since_last = now - _last_fetch_ts
+    gap = max(0.0, MIN_GAP_SECONDS - since_last)
+    if gap > 0:
+        time.sleep(gap)
+
+    _last_fetch_ts = time.perf_counter()
+
+# ===========================
+# Helpers
+# ===========================
+_PRICE_RX = re.compile(
+    r"(?:£|\bGBP[^\d]{0,3})(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)",
+    re.IGNORECASE,
+)
+
+
+def _extract_final_price(snippet: str) -> Optional[int]:
+    if not snippet:
+        return None
+    m = _PRICE_RX.search(snippet)
+    if not m:
+        return None
+    raw = m.group(1).replace(",", "")
+    try:
+        return int(round(float(raw)))
+    except Exception:
+        return None
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
-def _to_aware_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
-
-def _should_burst(now: datetime, end_time: datetime) -> bool:
-    end_time = _to_aware_utc(end_time) or end_time
-    return (end_time - BURST_WINDOW) <= now <= (end_time + CLOSE_DELAY)
-
-
-def _mark_ending_soon_if_needed():
-    now = _now_utc()
-    for a in get_open_auctions(now):
-        end_time = _to_aware_utc(a.get("end_time"))
-        if not end_time:
-            continue
-        if a.get("status") != "ENDING_SOON" and now >= (end_time - GRACE_WINDOW):
-            mark_status(a["id"], "ENDING_SOON")
-            logger.info(f"[close] Auction {a['id']} -> ENDING_SOON")
-
-
-def _fetch_detail_snapshot(detail_url: str) -> tuple[bool, float | None, str | None]:
-    """
-    Returns (ended, price, sale_type)
-    If ended is True but price is None, price was hidden/unavailable.
-    """
-    # 1) Cheap HEAD probe (don’t follow redirects)
+def _probe_get(url: str) -> tuple[int | None, str | None, bool]:
+    """Streaming GET (first ~64KB). Returns (status, snippet, anti_bot)."""
     try:
-        hr = head(detail_url, allow_redirects=False, timeout=15)
-    except Exception:
-        hr = None
-
-    # If we got a redirect, follow once (usually to "this listing has ended")
-    if hr is not None and 300 <= hr.status_code < 400 and hr.headers.get("Location"):
-        loc = hr.headers["Location"]
-        if loc.startswith("/"):
-            loc = urljoin(detail_url, loc)
-        r = http_get(loc, timeout=25)  # follow normally now
-    else:
-        # No redirect (or HEAD skipped) → fetch the page
-        r = http_get(detail_url, timeout=25)
-
-    html = r.text
-    soup = BeautifulSoup(html, "lxml")  # faster/more lenient than html.parser
-
-    # --- Heuristics:
-    text = soup.get_text(" ", strip=True).lower()
-    ended = ("this listing has ended" in text) or ("ended" in text and "listing" in text)
-
-    price: float | None = None
-    sale_type: str | None = None
-
-    # Try common price containers on ended pages
-    cand = soup.select_one(
-        "#prcIsum, .x-price-primary, .vi-price, .display-price, "
-        ".vi-VR-cvipPrice, .notranslate"
-    )
-    if cand:
-        import re
-        m = re.search(r"([0-9]+[0-9,]*\.?[0-9]*)", cand.get_text())
-        if m:
+        with _SESSION.get(
+            url,
+            headers=_COMMON_HEADERS,
+            timeout=TOTAL_TIMEOUT,
+            stream=True,
+            allow_redirects=True,
+        ) as r:
+            sc = r.status_code
+            buf = bytearray()
+            for chunk in r.iter_content(chunk_size=4096):
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if len(buf) >= PROBE_MAX_BYTES:
+                    break
             try:
-                price = float(m.group(1).replace(",", ""))
+                text = buf.decode(r.encoding or "utf-8", errors="ignore")
             except Exception:
-                price = None
-
-    # Infer sale type with weak heuristics
-    if "best offer accepted" in text:
-        sale_type = "best_offer"
-    elif "buy it now" in text:
-        sale_type = "bin"
-    elif "bids" in text or "bid" in text:
-        sale_type = "auction"
-
-    return ended, price, sale_type
+                text = buf.decode("utf-8", errors="ignore")
+            low = (text or "").lower()
+            anti = any(s in low for s in ANTI_BOT_SNIPPETS)
+            return sc, text, anti
+    except requests.RequestException:
+        return None, None, False
 
 
-def _close_due_auctions():
-    now = _now_utc()
-    due = get_open_auctions_ending_before(now + CLOSE_DELAY)  # include those within the close delay
-    for a in due:
-        auction_id = a["id"]
-        detail_url = a.get("detail_url")
-        end_time = _to_aware_utc(a.get("end_time"))
+def _parse_status(snippet: str) -> dict:
+    t = (snippet or "").lower()
+    ended = any(k in t for k in END_MARKERS) or ("ended" in t and "listing" in t)
+    sold = any(k in t for k in SOLD_MARKERS) or ("winning bid" in t)
+    return {"ended": ended, "sold": sold}
 
-        if not end_time:
-            continue
-        if now < (end_time + CLOSE_DELAY):
-            # not yet past the close delay
-            continue
+# ===========================
+# DB bulk operations
+# ===========================
+def _mark_ending_soon_bulk(cutoff: datetime) -> int:
+    with connection, connection.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = '3000ms'")
+        cur.execute("""
+            UPDATE auction_listings
+               SET status = 'ENDING_SOON'
+             WHERE end_time <= %s
+               AND status IN ('OPEN','ENDING_SOON','live','active','retry_soon')
+        """, (cutoff,))
+        return cur.rowcount
 
-        # Final detail fetch attempt for accurate close
+
+def _apply_results_bulk(results: list[CloseResult]) -> None:
+    if not results:
+        return
+
+    to_finalize_sold = [
+        (r.final_price, r.id)
+        for r in results
+        if r.action == "FINALIZE" and r.status == "sold" and r.final_price is not None
+    ]
+    to_finalize_unsold = [
+        (r.id,) for r in results if r.action == "FINALIZE" and r.status == "unsold"
+    ]
+    to_mark_live = [
+        (r.id,) for r in results if r.action == "MARK" and r.status == "live"
+    ]
+    to_mark_retry = [
+        (r.id,) for r in results if r.action == "MARK" and r.status == "retry_soon"
+    ]
+
+    with connection, connection.cursor() as cur:
+        if to_finalize_sold:
+            cur.executemany("""
+                UPDATE auction_listings
+                   SET status='sold', final_price=%s, last_seen=(now() AT TIME ZONE 'utc')
+                 WHERE id=%s
+            """, to_finalize_sold)
+        if to_finalize_unsold:
+            cur.executemany("""
+                UPDATE auction_listings
+                   SET status='unsold', final_price=NULL, last_seen=(now() AT TIME ZONE 'utc')
+                 WHERE id=%s
+            """, to_finalize_unsold)
+        if to_mark_live:
+            cur.executemany("UPDATE auction_listings SET status='live' WHERE id=%s", to_mark_live)
+        if to_mark_retry:
+            cur.executemany("UPDATE auction_listings SET status='retry_soon' WHERE id=%s", to_mark_retry)
+
+    logger.info(
+        "[close] batch done: finalized_sold=%d, finalized_unsold=%d, live=%d, retry=%d",
+        len(to_finalize_sold),
+        len(to_finalize_unsold),
+        len(to_mark_live),
+        len(to_mark_retry),
+    )
+
+# ===========================
+# Worker
+# ===========================
+def _close_one(a: Auction, idx: int, total: int, deadline: float) -> CloseResult:
+    if time.perf_counter() > deadline:
+        return CloseResult(a.id, "MARK", "retry_soon", None)
+
+    logger.info(f"[close] ({idx}/{total}) Processing auction {a.id}")
+
+    # 🐢 slower pre-request jitter
+    time.sleep(random.uniform(0.55, 1.15))
+    _pacing_sleep()
+
+    sc, snippet, antibot = _probe_get(a.url)
+
+    # Handle anti-bot or rate limiting
+    if antibot or sc == 429:
+        global _cooldown_until
+        _cooldown_until = time.perf_counter() + GLOBAL_COOLDOWN_S + random.uniform(1.0, 3.0)
+        logger.warning("[close] anti-bot/429 detected — cooling down for ~%.1fs", GLOBAL_COOLDOWN_S)
+        return CloseResult(a.id, "MARK", "retry_soon", None)
+
+    if sc is None:
+        return CloseResult(a.id, "MARK", "retry_soon", None)
+
+    if sc in (404, 410):
+        return CloseResult(a.id, "FINALIZE", "unsold", None)
+
+    if not (200 <= sc < 400) or not snippet:
+        return CloseResult(a.id, "MARK", "retry_soon", None)
+
+    info = _parse_status(snippet)
+    if info["ended"]:
+        fp = _extract_final_price(snippet)
+        if fp is None:
+            recent = get_recent_max_price(a.id, window_minutes=360)
+            if recent is not None:
+                try:
+                    fp = int(round(float(recent)))
+                except Exception:
+                    fp = None
+
+        if fp is not None:
+            return CloseResult(a.id, "FINALIZE", "sold", fp)
+        else:
+            return CloseResult(a.id, "FINALIZE", "unsold", None)
+
+    return CloseResult(a.id, "MARK", "live", None)
+
+# ===========================
+# Batch processor
+# ===========================
+def _process_due_auctions(due: Sequence[Auction], budget_seconds: float) -> None:
+    if not due:
+        logger.info("[close] no due auctions")
+        return
+
+    try:
+        due = sorted(
+            due,
+            key=lambda a: a.end_time or datetime.max.replace(tzinfo=timezone.utc)
+        )
+    except Exception:
+        pass
+
+    total = len(due)
+    if total > MAX_PER_HEARTBEAT:
+        logger.info(f"[close] Limiting close batch to {MAX_PER_HEARTBEAT}/{total} auctions this pass")
+        due = due[:MAX_PER_HEARTBEAT]
+        total = len(due)
+    else:
+        logger.info(f"[close] Processing {total} due auctions")
+
+    deadline = time.perf_counter() + budget_seconds
+    results: list[CloseResult] = []
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futs = [ex.submit(_close_one, a, i + 1, total, deadline) for i, a in enumerate(due)]
+        for fut in as_completed(futs):
+            try:
+                r = fut.result()
+                results.append(r)
+            except Exception as e:
+                logger.warning(f"[close] worker error: {e}")
+
+    _apply_results_bulk(results)
+
+# ===========================
+# Public entry point
+# ===========================
+def tick() -> None:
+    try:
+        logger.info("[close] ===== START CLOSE PASS =====")
+        t0 = time.perf_counter()
+        now = _now_utc()
+
+        if CLOSE_DISABLE:
+            logger.info("[close] CLOSE_DISABLE=1 — skipping close pass")
+            return
+
+        # Stage 1: ENDING_SOON
         try:
-            if detail_url:
-                ended, final_price, sale_type = _fetch_detail_snapshot(detail_url)
-            else:
-                logger.warning(f"[close] Auction {auction_id} missing detail_url; using fallback")
-                ended, final_price, sale_type = True, None, None  # fallback path
-
-            if ended:
-                if final_price is not None:
-                    finalize_auction(auction_id, final_price, "HIGH", "ENDED_CONFIRMED", sale_type)
-                    logger.info(f"[close] Auction {auction_id} ENDED_CONFIRMED @ {final_price}")
-                else:
-                    # No visible price (best offer / unsold / cancelled)
-                    recent = get_recent_max_price(auction_id, window_minutes=15)
-                    finalize_auction(auction_id, recent, "LOW", "ENDED_TENTATIVE", sale_type)
-                    logger.info(f"[close] Auction {auction_id} ENDED_TENTATIVE @ {recent} (no final price visible)")
-            else:
-                # Edge: page says not ended yet; skip and try next tick
-                logger.info(f"[close] Auction {auction_id} not ended per detail page; will retry")
+            cutoff = now + GRACE_WINDOW
+            rows = get_open_auctions_ending_before(cutoff) or []
+            logger.info(f"[close] ENDING_SOON candidates: {len(rows)} (cutoff={cutoff.isoformat()})")
+            updated = _mark_ending_soon_bulk(cutoff)
+            logger.info(f"[close] ENDING_SOON bulk updated: {updated}")
+            logger.info(f"[close] ENDING_SOON pass took {time.perf_counter() - t0:.2f}s")
         except Exception as e:
-            # Network or parse failure — be safe, record tentative using recent observed max
-            recent = get_recent_max_price(auction_id, window_minutes=15)
-            finalize_auction(auction_id, recent, "LOW", "ENDED_TENTATIVE", None)
-            logger.warning(f"[close] Auction {auction_id} tentative close (error): {e}")
+            logger.error(f"[close] ENDING_SOON pass failed: {e}")
 
+        # Stage 2: Due
+        try:
+            due_cutoff = now + CLOSE_DELAY
+            rows = get_open_auctions_ending_before(due_cutoff) or []
+            due = [_as_auction(r) for r in rows]
+            logger.info(f"[close] Due candidates: {len(due)} (cutoff={due_cutoff.isoformat()})")
+            _process_due_auctions(due, PASS_BUDGET_SECONDS)
+        except Exception as e:
+            logger.error(f"[close] due auctions pass failed: {e}")
 
-def _burst_polling_hook(poll_callback):
-    """
-    Optional: if you want to integrate a scheduler that hits detail URLs every BURST_INTERVAL_SECONDS
-    within BURST_WINDOW. Your scraper loop could call this with a roster of ending-soon auctions.
-    """
-    pass  # You can integrate with your existing scrape loop if desired.
+        # Stage 3: Stale fallback
+        try:
+            stale_rows = get_open_auctions_ending_before(now - STALE_UNENDED_FALLBACK) or []
+            stale = [_as_auction(r) for r in stale_rows]
+            logger.info(f"[close] Stale candidates: {len(stale)}")
+            logger.info("[close] Stale pass finalized: 0")
+        except Exception as e:
+            logger.error(f"[close] stale fallback pass failed: {e}")
 
-
-def tick():
-    """
-    Call this every heartbeat tick, e.g., right after or before your regular scraping run.
-    """
-    _mark_ending_soon_if_needed()
-    _close_due_auctions()
+        logger.info(f"[close] PASS DONE in {time.perf_counter() - t0:.2f}s")
+    except Exception as e:
+        logger.error(f"[close] FATAL in tick(): {e}")

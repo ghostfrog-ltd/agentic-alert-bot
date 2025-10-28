@@ -18,30 +18,25 @@ DEFAULT_HEADERS = {
     "X-Ghostfrog-Bot": "true",
 }
 
-# per-host pacing
-_LAST_CALL = {}
+# -------------------------
+# Per-host pacing / cooldown
+# -------------------------
+_LAST_CALL: dict[str, float] = {}
 _MIN_GAP = {
-    "coindesk.com": 6.0,  # ↑ from 2.5 → 6s (tune as needed)
+    "coindesk.com": 6.0,  # tune per host
 }
-
-# 429 backoff state
-_BACKOFF = {}  # host -> seconds
-
+# Backoff used for 429 Retry-After and our manual cooloffs
+_BACKOFF: dict[str, float] = {}   # host -> seconds
 
 def _host(url: str) -> str:
     return urlparse(url).netloc
-
 
 def _rate_limit(url: str):
     host = _host(url)
     now = time.time()
     gap = _MIN_GAP.get(host, 0.0)
-
-    # add jitter so patterns aren't robotic
-    gap += random.uniform(0.3, 0.9)
-
-    # include any active backoff (e.g., after 429)
-    gap = max(gap, _BACKOFF.get(host, 0.0))
+    gap += random.uniform(0.3, 0.9)  # jitter
+    gap = max(gap, _BACKOFF.get(host, 0.0))  # include active cooldown
 
     last = _LAST_CALL.get(host, 0.0)
     wait = last + gap - now
@@ -49,6 +44,11 @@ def _rate_limit(url: str):
         time.sleep(wait)
     _LAST_CALL[host] = time.time()
 
+def _trip_host(host: str, seconds: float):
+    # set/extend cooldown; cap to 3 minutes
+    seconds = float(max(0.0, min(seconds, 180.0)))
+    current = _BACKOFF.get(host, 0.0)
+    _BACKOFF[host] = max(current, seconds)
 
 def make_session() -> requests.Session:
     s = requests.Session()
@@ -57,7 +57,7 @@ def make_session() -> requests.Session:
         connect=3,
         read=3,
         backoff_factor=1.5,
-        status_forcelist=[500, 502, 503, 504],  # remove 429 here; we handle it manually
+        status_forcelist=[500, 502, 503, 504],  # keep 429 manual
         allowed_methods=["GET", "HEAD"],
         respect_retry_after_header=True,
         raise_on_status=False,
@@ -68,89 +68,97 @@ def make_session() -> requests.Session:
     s.headers.update(DEFAULT_HEADERS)
     return s
 
-
 SESSION = make_session()
 
-
-# replace your get(...) with this version:
-
+# -------------------------
+# GET with 429/503 handling
+# -------------------------
 def get(
-        url: str,
-        timeout: int = 25,
-        headers: Optional[dict] = None,
-        session: requests.Session | None = None,
-        **kwargs
+    url: str,
+    timeout: int = 25,
+    headers: Optional[dict] = None,
+    session: requests.Session | None = None,
+    **kwargs
 ) -> requests.Response:
     """
     Thin wrapper around requests.get that:
-      - rate limits per host
-      - handles 429 with backoff
-      - passes through arbitrary requests kwargs (e.g., allow_redirects, proxies)
+      - rate-limits per host
+      - handles 429 with Retry-After + exponential backoff
+      - handles 503 with a brief retry and per-host cooldown
+      - passes through arbitrary requests kwargs
     """
     _rate_limit(url)
-
     s = session or SESSION
     h = DEFAULT_HEADERS.copy()
     if headers:
         h.update(headers)
-
-    # default to following redirects unless caller overrides
     if "allow_redirects" not in kwargs:
         kwargs["allow_redirects"] = True
 
+    host = _host(url)
+
+    # First attempt
     r = s.get(url, timeout=timeout, headers=h, **kwargs)
 
+    # --- 429: honour Retry-After and backoff ourselves, then one more attempt
     if r.status_code == 429:
-        host = _host(url)
         ra = r.headers.get("Retry-After")
-        if ra:
-            try:
-                sleep_for = int(ra)
-            except ValueError:
-                sleep_for = 10
+        if ra and ra.isdigit():
+            sleep_for = int(ra)
         else:
+            # exponential-ish growth up to 60s
             prev = _BACKOFF.get(host, 6.0) or 6.0
             sleep_for = min(prev * 2, 60.0)
-            _BACKOFF[host] = sleep_for
-
+        _trip_host(host, sleep_for)  # trip cooldown so other calls also wait
         time.sleep(sleep_for + random.uniform(0.3, 0.9))
         _LAST_CALL[host] = time.time()
-
         r = s.get(url, timeout=timeout, headers=h, **kwargs)
+
+    # --- 503: brief retry and trip host cooldown
+    if r.status_code == 503:
+        # set a shared cooldown 60–150s to avoid hammering during WAF burps
+        _trip_host(host, random.uniform(60.0, 150.0))
+        # small sleep + retry once (your Session retry may have already retried 5xx)
+        time.sleep(random.uniform(1.0, 2.5))
+        _LAST_CALL[host] = time.time()
+        r2 = s.get(url, timeout=timeout, headers=h, **kwargs)
+        if r2.status_code == 503:
+            # keep cooldown; raise for caller to decide (e.g., postpone)
+            r2.raise_for_status()
+        r = r2
 
     r.raise_for_status()
     if r.ok:
-        _BACKOFF.pop(_host(url), None)
+        # success -> clear any host backoff so normal pacing resumes
+        _BACKOFF.pop(host, None)
     return r
 
-
-import time, random
-
+# -------------------------
+# Generic sleepy helper
+# -------------------------
+import time as _t, random as _r
 _last_call = 0.0
-
-
 def sleep_rate(base=4.0, jitter=0.35, floor=2.5):
     global _last_call
-    now = time.time()
-    # enforce min gap since last call
+    now = _t.time()
     spread = base * jitter
-    interval = max(floor, base + random.uniform(-spread, spread))
+    interval = max(floor, base + _r.uniform(-spread, spread))
     wait = (_last_call + interval) - now
     if wait > 0:
-        time.sleep(wait)
-    _last_call = time.time()
+        _t.sleep(wait)
+    _last_call = _t.time()
 
-
+# -------------------------
+# Heuristics for ended pages
+# -------------------------
 ENDED_MARKERS = (
     "This listing was ended", "This listing has ended", "This listing was ended by the seller",
     "Looks like this item has been sold", "The listing you’re looking for has ended",
     "invalid item", "no longer available"
 )
 
-
 def is_ended_listing(html_lower: str) -> bool:
     return any(k.lower() in html_lower for k in ENDED_MARKERS)
-
 
 def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str = ""):
     status = getattr(r, "status_code", "NA")
@@ -160,7 +168,9 @@ def warn_blocked(domain: str, url: str, r: requests.Response | None, reason: str
         msg += f" reason={reason}"
     logger.warning(msg)
 
-# optional: add a HEAD helper that mirrors get()
+# -------------------------
+# HEAD with same semantics
+# -------------------------
 def head(
     url: str,
     timeout: int = 15,
@@ -175,16 +185,33 @@ def head(
         h.update(headers)
     if "allow_redirects" not in kwargs:
         kwargs["allow_redirects"] = True
+
+    host = _host(url)
+
     r = s.head(url, timeout=timeout, headers=h, **kwargs)
+
     if r.status_code == 429:
-        host = _host(url)
         ra = r.headers.get("Retry-After")
-        sleep_for = int(ra) if ra and ra.isdigit() else min(_BACKOFF.get(host, 6.0) * 2 if _BACKOFF.get(host) else 6.0, 60.0)
-        _BACKOFF[host] = sleep_for
+        if ra and ra.isdigit():
+            sleep_for = int(ra)
+        else:
+            prev = _BACKOFF.get(host, 6.0) or 6.0
+            sleep_for = min(prev * 2, 60.0)
+        _trip_host(host, sleep_for)
         time.sleep(sleep_for + random.uniform(0.3, 0.9))
         _LAST_CALL[host] = time.time()
         r = s.head(url, timeout=timeout, headers=h, **kwargs)
+
+    if r.status_code == 503:
+        _trip_host(host, random.uniform(60.0, 150.0))
+        time.sleep(random.uniform(1.0, 2.0))
+        _LAST_CALL[host] = time.time()
+        r2 = s.head(url, timeout=timeout, headers=h, **kwargs)
+        if r2.status_code == 503:
+            r2.raise_for_status()
+        r = r2
+
     r.raise_for_status()
     if r.ok:
-        _BACKOFF.pop(_host(url), None)
+        _BACKOFF.pop(host, None)
     return r

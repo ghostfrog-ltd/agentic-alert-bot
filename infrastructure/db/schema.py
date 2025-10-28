@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from statistics import median
 from typing import Optional, Tuple, List, Dict, Any
 
 from psycopg2.extras import RealDictCursor
@@ -112,6 +111,67 @@ def mark_status(auction_id: int, status: str):
              WHERE id = %s
         """, (status, auction_id))
 
+# infrastructure/db/schema.py
+from psycopg2.extras import execute_values
+
+def bulk_append_price_history(rows: list[tuple[str, int, int]]):
+    if not rows:
+        return
+    # rows are: (external_id, price, bids_count)
+    sql = """
+        INSERT INTO auction_price_history (external_id, price, bids_count, recorded_at)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
+        # Provide recorded_at via template so rows stay 3-tuples
+        execute_values(
+            cur,
+            sql,
+            rows,
+            template="(%s, %s, %s, (now() AT TIME ZONE 'utc'))",
+            page_size=500,
+        )
+
+def bulk_upsert_auction_listings(rows: list[dict]):
+    if not rows:
+        return
+    cols = [
+        "source","external_id","title","price_current","bids_count","end_time",
+        "url","detail_url","sale_type","roi_estimate","max_bid","notes",
+        "source_id","model_key","time_left_s","status"
+    ]
+    values = [tuple(r.get(c) for c in cols) for r in rows]
+
+    sql = f"""
+        INSERT INTO auction_listings ({", ".join(cols)})
+        VALUES %s
+        ON CONFLICT (external_id) DO UPDATE
+        SET title         = EXCLUDED.title,
+            price_current = COALESCE(EXCLUDED.price_current, auction_listings.price_current),
+            bids_count    = COALESCE(EXCLUDED.bids_count,    auction_listings.bids_count),
+            end_time      = COALESCE(EXCLUDED.end_time,      auction_listings.end_time),
+            url           = EXCLUDED.url,
+            detail_url    = EXCLUDED.detail_url,
+            sale_type     = EXCLUDED.sale_type,
+            roi_estimate  = EXCLUDED.roi_estimate,
+            max_bid       = EXCLUDED.max_bid,
+            notes         = EXCLUDED.notes,
+            source_id     = EXCLUDED.source_id,
+            model_key     = COALESCE(EXCLUDED.model_key,     auction_listings.model_key),
+            time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
+            status        = COALESCE(EXCLUDED.status,        auction_listings.status),
+            last_seen     = (now() AT TIME ZONE 'utc')
+    """
+    from psycopg2.extras import execute_values
+    conn = connection
+    with conn, conn.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
+        execute_values(cur, sql, values, page_size=250)
 
 def finalize_auction(
     auction_id: int,
@@ -444,7 +504,7 @@ def truncate_prices():
 
 
 # ---------------------------
-# SCRAPE STATE
+# SCRAPE/ALERT STATE
 # ---------------------------
 def create_scrape_state():
     with connection, connection.cursor() as cur:
@@ -458,6 +518,32 @@ def create_scrape_state():
             )
         """)
 
+def create_alert_state():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS alert_state (
+                name TEXT PRIMARY KEY,
+                last_sent_at TIMESTAMPTZ
+            )
+        """)
+
+def get_alert_last_sent(name: str) -> Optional[datetime]:
+    with connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SELECT last_sent_at FROM alert_state WHERE name=%s", (name,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO alert_state (name, last_sent_at)
+            VALUES (%s, %s)
+            ON CONFLICT (name) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
+        """, (name, to_aware_utc(when) if when else None))
+
 
 # ---------------------------
 # AUCTIONS
@@ -468,6 +554,7 @@ def create_auction_tables():
     (Types use TIMESTAMPTZ; names match mark_listing_seen/upsert_auction_listing.)
     """
     with connection, connection.cursor() as cur:
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
         ensure_utc_session(cur)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auction_listings (
@@ -478,6 +565,7 @@ def create_auction_tables():
                 title TEXT,
                 price_current NUMERIC,
                 final_price NUMERIC,
+                final_price_confidence TEXT,
                 bids_count INTEGER,
                 end_time TIMESTAMPTZ,
                 status TEXT DEFAULT 'live',
@@ -504,8 +592,6 @@ def create_auction_tables():
                 recorded_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
             )
         """)
-    print("Auction tables created or already exist.")
-
 
 def append_price_history(*, external_id: str, price: int | float | None, bids_count: int | None):
     conn = connection
@@ -535,6 +621,7 @@ def mark_listing_seen(
     """
     conn = connection
     with conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
         ensure_utc_session(cur)
         cur.execute("""
             UPDATE auction_listings
@@ -572,60 +659,6 @@ def insert_or_ignore_listing(
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'live', (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'))
             ON CONFLICT (external_id) DO NOTHING
         """, (source, external_id, title, url, price_current, bids_count, to_aware_utc(end_time) if end_time else None, model_key))
-
-
-def latest_comps_map() -> Dict[str, Dict[str, Any]]:
-    conn = connection
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        ensure_utc_session(cur)
-        cur.execute("""
-            WITH lc AS (
-              SELECT DISTINCT ON (model_key) model_key, median_final_price, mean_final_price, samples, computed_at
-              FROM comps
-              ORDER BY model_key, computed_at DESC
-            )
-            SELECT * FROM lc
-        """)
-        rows = cur.fetchall()
-        return {r["model_key"]: r for r in rows}
-
-
-def compute_daily_comps():
-    conn = connection
-    with conn, conn.cursor() as cur:
-        ensure_utc_session(cur)
-        cur.execute("""
-            INSERT INTO comps (model_key, median_final_price, mean_final_price, samples)
-            SELECT model_key,
-                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY final_price)::numeric AS median_final_price,
-                   AVG(final_price)::numeric AS mean_final_price,
-                   COUNT(*)::int AS samples
-            FROM auction_listings
-            WHERE status = 'sold' AND final_price IS NOT NULL AND model_key IS NOT NULL
-            GROUP BY model_key
-        """)
-
-
-def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, int | None]:
-    with connection, connection.cursor() as cur:
-        ensure_utc_session(cur)
-        cur.execute("""
-            INSERT INTO alerts (external_id, score, max_bid, created_at)
-            VALUES (%s, %s, %s, (now() AT TIME ZONE 'utc'))
-            ON CONFLICT (external_id) DO UPDATE
-                SET score = EXCLUDED.score,
-                    max_bid = EXCLUDED.max_bid,
-                    updated_at = (now() AT TIME ZONE 'utc')
-            RETURNING id, (xmax = 0) AS inserted;
-        """, (external_id, score, max_bid))
-        row = cur.fetchone()
-        created_now = bool(row[1])
-        return created_now, row[0]
-
-
-def mark_alert_emailed(alert_id: int):
-    with connection, connection.cursor() as cur:
-        cur.execute("UPDATE alerts SET sent_at = (now() AT TIME ZONE 'utc') WHERE id = %s", (alert_id,))
 
 
 def upsert_auction_listing(
@@ -749,3 +782,180 @@ def get_active_auctions():
             ORDER BY end_time ASC NULLS LAST
         """)
         return cur.fetchall()
+
+
+# ---------------------------
+# ALERTS (per-listing alerts)
+# ---------------------------
+def create_alerts():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id SERIAL PRIMARY KEY,
+                external_id TEXT UNIQUE NOT NULL,
+                score DOUBLE PRECISION,
+                max_bid NUMERIC,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+                sent_at TIMESTAMPTZ
+            )
+        """)
+
+def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, int | None]:
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO alerts (external_id, score, max_bid, created_at, updated_at)
+            VALUES (%s, %s, %s, (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'))
+            ON CONFLICT (external_id) DO UPDATE
+                SET score = EXCLUDED.score,
+                    max_bid = EXCLUDED.max_bid,
+                    updated_at = (now() AT TIME ZONE 'utc')
+            RETURNING id, (xmax = 0) AS inserted;
+        """, (external_id, score, max_bid))
+        row = cur.fetchone()
+        created_now = bool(row[1])
+        return created_now, row[0]
+
+
+def mark_alert_emailed(alert_id: int):
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("UPDATE alerts SET sent_at = (now() AT TIME ZONE 'utc') WHERE id = %s", (alert_id,))
+
+
+
+# ---------------------------
+# COMPS (aggregates)
+# ---------------------------
+def create_comps():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS comps (
+                id SERIAL PRIMARY KEY,
+                model_key TEXT NOT NULL,
+                median_final_price NUMERIC,
+                mean_final_price NUMERIC,
+                samples INTEGER NOT NULL DEFAULT 0,
+                computed_at TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
+            )
+        """)
+
+def latest_comps_map() -> Dict[str, Dict[str, Any]]:
+    conn = connection
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            WITH lc AS (
+              SELECT DISTINCT ON (model_key) model_key, median_final_price, mean_final_price, samples, computed_at
+              FROM comps
+              ORDER BY model_key, computed_at DESC
+            )
+            SELECT * FROM lc
+        """)
+        rows = cur.fetchall()
+        return {r["model_key"]: r for r in rows}
+
+
+def compute_daily_comps(days: int = 30):
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO comps (model_key, median_final_price, mean_final_price, samples, computed_at)
+            SELECT model_key,
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY final_price)::numeric AS median_final_price,
+                   AVG(final_price)::numeric AS mean_final_price,
+                   COUNT(*)::int AS samples,
+                   (now() AT TIME ZONE 'utc') AS computed_at
+            FROM auction_listings
+            WHERE status IN ('sold','ENDED_CONFIRMED')
+              AND final_price IS NOT NULL
+              AND model_key IS NOT NULL
+              AND end_time >= (now() AT TIME ZONE 'utc' - (%s || ' days')::interval)
+            GROUP BY model_key
+        """, (str(days),))
+    # optional housekeeping
+    try:
+        prune_old_comps(keep_per_key=60)
+    except Exception:
+        pass
+    try:
+        refresh_latest_comps_matview()
+    except Exception:
+        pass
+
+def create_latest_comps_matview():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            CREATE MATERIALIZED VIEW IF NOT EXISTS latest_comps AS
+            SELECT DISTINCT ON (model_key) *
+            FROM comps
+            ORDER BY model_key, computed_at DESC
+        """)
+        # index to speed reads of the MV
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_latest_comps_model_key ON latest_comps(model_key)")
+
+def refresh_latest_comps_matview():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("REFRESH MATERIALIZED VIEW latest_comps")
+
+def prune_old_comps(keep_per_key: int = 60):
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute(f"""
+            WITH ranked AS (
+              SELECT model_key, computed_at,
+                     ROW_NUMBER() OVER (PARTITION BY model_key ORDER BY computed_at DESC) AS rn
+              FROM comps
+            )
+            DELETE FROM comps c
+            USING ranked r
+            WHERE c.model_key = r.model_key
+              AND c.computed_at = r.computed_at
+              AND r.rn > %s
+        """, (keep_per_key,))
+
+
+# ---------------------------
+# Indexes (performance)
+# ---------------------------
+def create_indexes():
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        # existing…
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_status ON auction_listings(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_end_time ON auction_listings(end_time)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_model_key ON auction_listings(model_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_source ON auction_listings(source)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sources_last_scraped ON sources(last_scraped_at)")
+        # new (for comps snapshots)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_comps_model_key ON comps(model_key)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_comps_computed_at ON comps(computed_at)")
+
+
+
+# ---------------------------
+# Init (safe, idempotent)
+# ---------------------------
+def init_schema():
+    create_sources()
+    create_articles()
+    create_prices()
+    create_scrape_state()
+    create_alert_state()
+    create_auction_tables()
+    create_alerts()
+    create_comps()
+    create_indexes()
+    create_latest_comps_matview()
+
+# Run on import; harmless due to IF NOT EXISTS everywhere.
+try:
+    init_schema()
+except Exception as e:
+    # Avoid hard-crashing on import; caller can run init_schema() explicitly if desired.
+    pass

@@ -1,10 +1,12 @@
+# agent/actions/alert_new_listings.py
 from __future__ import annotations
 from typing import Iterable, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import connection
 from infrastructure.utils.emailer import send_email
+from infrastructure.utils.timez import now_utc, to_aware_utc  # ← centralised helpers
 
 logger = get_logger(__name__)
 
@@ -15,19 +17,6 @@ SOURCES_FILTER: Optional[Iterable[str]] = None
 ASSUME_PENNIES = False
 MAX_BODY_CHARS = 12000
 FIRST_RUN_LOOKBACK_HOURS = 24  # or 168 for a full week
-
-
-# ---------- time helpers (AWARE UTC end-to-end for timestamptz) ----------
-def to_aware_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def utc_now_aware() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 # ---------- state ----------
@@ -51,7 +40,7 @@ def _set_last_sent_at(cur, ts: datetime):
 # ---------- data ----------
 def _fetch_new_listings(cur, cutoff: datetime):
     """
-    NEW: filter on first_seen (timestamptz), not fetched_at.
+    Filter on first_seen (timestamptz).
     ASC order so we can advance the watermark safely without skipping.
     """
     cutoff = to_aware_utc(cutoff)
@@ -60,7 +49,7 @@ def _fetch_new_listings(cur, cutoff: datetime):
             f"""
             SELECT source, title, price_current, url, first_seen
             FROM auction_listings
-            WHERE first_seen > %s AND source = ANY(%s::text[])
+            WHERE first_seen > %s AND source = ANY(%s)
             ORDER BY first_seen ASC
             LIMIT {MAX_ITEMS}
             """,
@@ -89,12 +78,13 @@ def _debug_peek(cur, cutoff: datetime):
     c2 = cur.fetchone()[0]
     cur.execute("SELECT MAX(first_seen), MAX(fetched_at) FROM auction_listings")
     max_first, max_fetch = cur.fetchone()
-    logger.info(
-        "[alert_new_listings] peek: first_seen>%s -> %s, fetched_at>%s -> %s | max first_seen=%s, max fetched_at=%s",
-        cutoff.isoformat(), c1, cutoff.isoformat(), c2,
-        (to_aware_utc(max_first).isoformat() if max_first else None),
-        (to_aware_utc(max_fetch).isoformat() if max_fetch else None),
-    )
+    # Uncomment if you want verbose diagnostics:
+    # logger.info(
+    #     "[alert_new_listings] peek: first_seen>%s -> %s, fetched_at>%s -> %s | max first_seen=%s, max fetched_at=%s",
+    #     cutoff.isoformat(), c1, cutoff.isoformat(), c2,
+    #     (to_aware_utc(max_first).isoformat() if max_first else None),
+    #     (to_aware_utc(max_fetch).isoformat() if max_fetch else None),
+    # )
 
 
 # ---------- formatting ----------
@@ -119,18 +109,16 @@ def run():
         pass
 
     last_sent = _get_last_sent_at(cur)  # aware UTC or None
-    now_aware = utc_now_aware()
+    now_aware = now_utc()
 
     # If never sent, look back FIRST_RUN_LOOKBACK_HOURS; else use WINDOW_MINUTES or last_sent (whichever is later)
     default_cut = (now_aware - timedelta(hours=FIRST_RUN_LOOKBACK_HOURS)) if last_sent is None else (now_aware - timedelta(minutes=WINDOW_MINUTES))
     cutoff = max(default_cut, last_sent) if last_sent else default_cut  # aware UTC
 
-    # Peek to see what the DB actually has beyond the cutoff
     _debug_peek(cur, cutoff)
 
     rows = _fetch_new_listings(cur, cutoff)
     if not rows:
-        logger.info("[alert_new_listings] no new listings since %s", cutoff.isoformat())
         return
 
     lines = []

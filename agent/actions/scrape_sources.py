@@ -73,7 +73,7 @@ def run_auctions():
                 logger.info(f"[scrape-auctions] Skipping disabled source: {adapter.DOMAIN}")
                 continue
 
-            # ⛑️ Guard fetch phase so tz bugs don't abort the whole cycle
+            # Guard fetch phase so tz bugs don't abort the whole cycle
             try:
                 urls = adapter.fetch_listing_urls()
             except Exception as e:
@@ -91,8 +91,16 @@ def run_auctions():
                     logger.warning(
                         f"[scrape-auctions] {adapter.DOMAIN} parse failed {url}: {e}\n{traceback.format_exc()}"
                     )
+
+            # flush once per adapter (bulk insert instead of per row)
+            try:
+                adapter.flush_batch()
+            except AttributeError:
+                # not all adapters may have batching yet
+                pass
+            except Exception as e:
+                logger.error(f"[scrape-auctions] {adapter.DOMAIN} flush_batch failed: {e}")
     except Exception as e:
-        # This should basically never trigger now, but keep it as a belt-and-braces catch.
         logger.error(f"[scrape-auctions] run_auctions() failed: {e}\n{traceback.format_exc()}")
 
 
@@ -104,6 +112,6 @@ def run():
     Returns list of news articles (auction results are written directly to DB).
     """
     logger.info("[scrape] Starting full scrape cycle.")
-    run_news()
+    #run_news()
     run_auctions()
     logger.info("[scrape] Scrape cycle complete..")

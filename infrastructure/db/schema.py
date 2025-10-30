@@ -921,6 +921,70 @@ def prune_old_comps(keep_per_key: int = 60):
 
 
 # ---------------------------
+# EBAY APP TOKEN CACHE
+# ---------------------------
+
+def create_ebay_app_token():
+    """
+    Single-row table to persist the eBay application OAuth token cross-process.
+    """
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS ebay_app_token (
+                id          INT PRIMARY KEY DEFAULT 1,
+                token       TEXT NOT NULL,
+                expiry_ts   TIMESTAMPTZ NOT NULL,
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'utc')
+            )
+        """)
+
+
+def load_cached_ebay_token() -> Optional[tuple[str, float]]:
+    """
+    Returns (token, expiry_epoch_seconds) if we have a valid row,
+    otherwise None. Does NOT enforce freshness; caller decides.
+    """
+    with connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            SELECT token, expiry_ts
+            FROM ebay_app_token
+            WHERE id = 1
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    token, expiry_ts = row  # expiry_ts is timestamptz -> Python datetime
+    # convert timestamptz -> epoch seconds (UTC)
+    expiry_epoch = expiry_ts.replace(tzinfo=timezone.utc).timestamp()
+    return token, expiry_epoch
+
+
+def save_cached_ebay_token(token: str, expiry_epoch: float) -> None:
+    """
+    Upsert the token+expiry back into DB so the next process can reuse it.
+    expiry_epoch is epoch seconds UTC.
+    """
+    expiry_dt = datetime.fromtimestamp(expiry_epoch, tz=timezone.utc)
+
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO ebay_app_token (id, token, expiry_ts, updated_at)
+            VALUES (1, %s, %s, (now() AT TIME ZONE 'utc'))
+            ON CONFLICT (id) DO UPDATE
+                SET token = EXCLUDED.token,
+                    expiry_ts = EXCLUDED.expiry_ts,
+                    updated_at = (now() AT TIME ZONE 'utc')
+        """, (token, expiry_dt))
+
+
+
+# ---------------------------
 # Indexes (performance)
 # ---------------------------
 def create_indexes():
@@ -952,6 +1016,7 @@ def init_schema():
     create_comps()
     create_indexes()
     create_latest_comps_matview()
+    create_ebay_app_token()  # <-- add this
 
 # Run on import; harmless due to IF NOT EXISTS everywhere.
 try:

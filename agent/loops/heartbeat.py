@@ -11,6 +11,16 @@ load_dotenv()
 from infrastructure.utils.logger import get_logger
 logger = get_logger(__name__)
 
+# -------------------------------------------------
+# eBay Auth (new dependency for API-backed scraping)
+# -------------------------------------------------
+try:
+    from infrastructure.ebay.auth import get_auth, EbayAuthError
+except Exception as e:
+    get_auth = None
+    EbayAuthError = Exception  # fallback so except still works
+    logger.error(f"[Heartbeat] import get_auth failed: {e}")
+
 # ---------- Optional imports guarded (keep loose coupling)
 try:
     from agent.actions.scrape_sources import run as run_scrape
@@ -53,6 +63,29 @@ except Exception:
     compute_daily_comps = None
 
 # -----------------------------
+# Deal with env always being true
+# -----------------------------
+def env_flag(name: str, default: str = "0") -> bool:
+    """
+    Read an environment variable and convert it into a proper boolean.
+
+    Recognised truthy values (case-insensitive):
+        "1", "true", "yes", "on"
+    Recognised falsy values:
+        "0", "false", "no", "off", "", or not set at all.
+
+    Examples:
+        GF_HEARTBEAT_ENABLE_SCRAPE=1      → True
+        GF_HEARTBEAT_ENABLE_CLOSE=false    → False
+        GF_HEARTBEAT_ENABLE_ALERTS=off     → False
+    """
+    val = os.getenv(name, default)
+    if val is None:
+        return False
+    val = val.strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+# -----------------------------
 # ENV KNOBS (safe defaults)
 # -----------------------------
 SLEEP_BASE_S  = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
@@ -60,13 +93,12 @@ SLEEP_JITTER  = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
 REFRESH_HRS   = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
 
 # Feature toggles (easy runtime control)
-
-FEAT_FLIPS    = os.getenv("GF_HEARTBEAT_ENABLE_FLIPS", "0")
-FEAT_CLOSE    = os.getenv("GF_HEARTBEAT_ENABLE_CLOSE", "0")
-FEAT_SCRAPE   = os.getenv("GF_HEARTBEAT_ENABLE_SCRAPE", "0")
-FEAT_COMPS    = os.getenv("GF_HEARTBEAT_ENABLE_COMPS", "0")
-FEAT_SCAN     = os.getenv("GF_HEARTBEAT_ENABLE_SCAN_ENDING", "0")
-FEAT_ALERTS   = os.getenv("GF_HEARTBEAT_ENABLE_ALERTS", "0")
+FEAT_FLIPS  = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
+FEAT_CLOSE  = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
+FEAT_SCRAPE = env_flag("GF_HEARTBEAT_ENABLE_SCRAPE")
+FEAT_COMPS  = env_flag("GF_HEARTBEAT_ENABLE_COMPS")
+FEAT_SCAN   = env_flag("GF_HEARTBEAT_ENABLE_SCAN_ENDING")
+FEAT_ALERTS = env_flag("GF_HEARTBEAT_ENABLE_ALERTS")
 
 # Protection against overlapping heartbeats in the same process
 _lock = threading.Lock()
@@ -128,14 +160,37 @@ def tick():
     start_wall = perf_counter()
     logger.info("\n\n==================== 🫀 HEARTBEAT START ====================\n")
 
+    # -------------------------------------------------
+    # eBay auth pre-flight
+    # -------------------------------------------------
+    ebay_token = None
+    auth_ok = False
+    if get_auth:
+        try:
+            ebay_token = get_auth().get_token()  # will refresh if needed
+            auth_ok = True
+            logger.info("[Heartbeat] eBay auth OK (token acquired)")
+        except EbayAuthError as e:
+            logger.error(f"[Heartbeat] eBay auth failed: {e}")
+        except Exception as e:
+            logger.error(f"[Heartbeat] eBay auth unexpected error: {e}")
+    else:
+        logger.error("[Heartbeat] eBay auth helper not available")
+
     try:
         # 1) Close auctions first (final_price + status)
         if FEAT_CLOSE and close_tick:
             _time_step("close_tick", close_tick)
 
-        # 2) Scrape new/updated listings
-        if _should_scrape_safe():
-            _time_step("scrape_sources", run_scrape)
+        # 2) Scrape new/updated listings (now API-backed)
+        #    Only run if:
+        #       - scrape feature is on
+        #       - scrape function is imported
+        #       - we passed auth_ok (so we can talk to eBay API)
+        if _should_scrape_safe() and auth_ok:
+            _time_step("scrape_sources", run_scrape, ebay_token=ebay_token)
+        elif _should_scrape_safe() and not auth_ok:
+            logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
         else:
             logger.info("[Heartbeat] scrape_sources skipped (gate off or not due)")
 
@@ -155,8 +210,8 @@ def tick():
             _time_step("alert_new_listings", alert_new_listings)
 
         total_dt = perf_counter() - start_wall
-        logger.info(f"\n[Heartbeat] TOTAL {total_dt:.2f}s")
+        logger.info(f"[Heartbeat] TOTAL {total_dt:.2f}s")
     finally:
-        logger.info("\n===================== 🫀 HEARTBEAT END =====================\n")
+        logger.info("\n\n===================== 🫀 HEARTBEAT END =====================\n")
         _lock.release()
         _sleep_with_jitter()

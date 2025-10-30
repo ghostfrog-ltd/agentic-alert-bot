@@ -83,7 +83,7 @@ def _fetch_active_listings() -> List[Dict[str, Any]]:
             COALESCE(price_current, 0) AS price_current,
             status, end_time, time_left_s
         FROM auction_listings
-        WHERE status IN ('active','live','OPEN','ENDING_SOON')
+        WHERE status IN ('active','live','OPEN','ending_soon')
           AND price_current IS NOT NULL
     """
     with schema.connection.cursor(cursor_factory=RealDictCursor) as cur:

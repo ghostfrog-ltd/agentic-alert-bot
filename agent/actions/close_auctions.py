@@ -41,8 +41,8 @@ TOTAL_TIMEOUT = (CONNECT_TIMEOUT_S, READ_TIMEOUT_S)
 
 # 🔻 Make it gentler by default
 MAX_WORKERS = int(os.getenv("CLOSE_MAX_WORKERS", "1"))  # was "4"
-MIN_GAP_SECONDS = float(os.getenv("CLOSE_MIN_GAP_S", "0.9"))
-GLOBAL_COOLDOWN_S = float(os.getenv("CLOSE_COOLDOWN_S", "22"))
+MIN_GAP_SECONDS = float(os.getenv("CLOSE_MIN_GAP_S", "5.8"))
+GLOBAL_COOLDOWN_S = float(os.getenv("CLOSE_COOLDOWN_S", "34"))
 
 PROBE_MAX_BYTES = 65536
 
@@ -211,9 +211,9 @@ def _mark_ending_soon_bulk(cutoff: datetime) -> int:
         cur.execute("SET LOCAL statement_timeout = '3000ms'")
         cur.execute("""
             UPDATE auction_listings
-               SET status = 'ENDING_SOON'
+               SET status = 'ending_soon'
              WHERE end_time <= %s
-               AND status IN ('OPEN','ENDING_SOON','live','active','retry_soon')
+               AND status IN ('OPEN','ending_soon','live','active','retry_soon')
         """, (cutoff,))
         return cur.rowcount
 

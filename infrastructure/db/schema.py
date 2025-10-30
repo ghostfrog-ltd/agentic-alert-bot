@@ -40,7 +40,7 @@ def get_open_auctions(now: datetime) -> list[dict]:
     sql = """
     SELECT id, external_id, detail_url, end_time, status
     FROM auction_listings
-    WHERE status IN ('OPEN','ENDING_SOON','live','active')
+    WHERE status IN ('OPEN','ending_soon','live','active')
     """
     with connection.cursor() as cur:
         ensure_utc_session(cur)
@@ -54,7 +54,7 @@ def get_open_auctions_ending_before(now: datetime) -> list[dict]:
     sql = """
     SELECT id, external_id, detail_url, end_time
     FROM auction_listings
-    WHERE status IN ('OPEN','ENDING_SOON','live','active')
+    WHERE status IN ('OPEN','ending_soon','live','active')
       AND end_time IS NOT NULL
       AND end_time <= %s
     """
@@ -778,7 +778,7 @@ def get_active_auctions():
         cur.execute("""
             SELECT id, source_id, external_id, title, price_current, bids_count, end_time, url
             FROM auction_listings
-            WHERE status IN ('active','live','OPEN','ENDING_SOON')
+            WHERE status IN ('active','live','OPEN','ending_soon')
             ORDER BY end_time ASC NULLS LAST
         """)
         return cur.fetchall()

@@ -5,8 +5,6 @@ send_email("Test Alert", "This is a test from GhostFrog Bot")
 from infrastructure.db.migrations import apply_migrations
 apply_migrations()
 
-'''
-
 
 
 from infrastructure.db.schema import connection
@@ -24,3 +22,10 @@ for row_id, title in rows:
                 "UPDATE auction_listings SET model_key = %s WHERE id = %s",
                 (key, row_id)
             )
+
+'''
+
+
+from infrastructure.utils.usage_tracker import increment_api_usage
+increment_api_usage("ebay")
+

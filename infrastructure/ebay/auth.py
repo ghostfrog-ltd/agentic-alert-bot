@@ -11,6 +11,7 @@ from infrastructure.db.schema import (
     load_cached_ebay_token,
     save_cached_ebay_token,
 )
+from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ add this
 
 logger = get_logger(__name__)
 
@@ -141,6 +142,9 @@ class EbayAuth:
                 resp.text[:500],
             )
             raise EbayAuthError(f"Token request failed with HTTP {resp.status_code}")
+
+        # ✅ At this point the call to eBay succeeded, so count it
+        increment_api_usage("ebay")
 
         payload = resp.json()
         access_token = payload.get("access_token")

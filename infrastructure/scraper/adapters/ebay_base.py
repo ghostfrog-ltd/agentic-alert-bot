@@ -16,6 +16,7 @@ from infrastructure.db.schema import (
     bulk_upsert_auction_listings,
     bulk_append_price_history,
 )
+from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ add this
 
 logger = get_logger(__name__)
 
@@ -244,8 +245,6 @@ class EbayAdapterBase:
             logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
             return []
 
-        # Browse API: item_summary/search
-        # We'll ask by category_id. You can enrich with filters later.
         url = (
             f"{base}/buy/browse/v1/item_summary/search"
             f"?category_ids={category_id}"
@@ -268,6 +267,9 @@ class EbayAdapterBase:
                 f"[{self.DOMAIN}] API {category_id} status {r.status_code}: {r.text[:200]}"
             )
             return []
+
+        # ✅ At this point the call to eBay succeeded, so count it
+        increment_api_usage("ebay")
 
         try:
             payload = r.json()

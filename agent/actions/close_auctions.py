@@ -1,4 +1,3 @@
-# agent/actions/close_auctions.py
 from __future__ import annotations
 
 import os
@@ -94,17 +93,41 @@ class Auction:
 
 
 def _as_auction(row: Any) -> Auction:
+    """
+    Normalise whatever shape DB row/helper returns into an Auction.
+    We support both legacy scrape rows and API-ingested rows.
+
+    Expected fields from DB (varies by codepath):
+    - id / auction_id
+    - detail_url / url / web_url  (must be a public listing URL we can probe)
+    - end_time (UTC timestamptz)
+    """
     if isinstance(row, Auction):
         return row
+
+    # dict-like row
     if isinstance(row, dict):
         return Auction(
-            id=row.get("id") or row.get("auction_id"),
-            url=row.get("detail_url") or row.get("url"),
+            id=(
+                row.get("id")
+                or row.get("auction_id")
+            ),
+            url=(
+                row.get("detail_url")
+                or row.get("url")
+                or row.get("web_url")      # <- allow API field name
+            ),
             end_time=row.get("end_time"),
         )
+
+    # fallback: attribute-style row
     return Auction(
-        id=getattr(row, "id"),
-        url=getattr(row, "detail_url", None) or getattr(row, "url", None),
+        id=getattr(row, "id", None) or getattr(row, "auction_id", None),
+        url=(
+            getattr(row, "detail_url", None)
+            or getattr(row, "url", None)
+            or getattr(row, "web_url", None)  # <- allow API field name
+        ),
         end_time=getattr(row, "end_time", None),
     )
 
@@ -207,14 +230,29 @@ def _parse_status(snippet: str) -> dict:
 # DB bulk operations
 # ===========================
 def _mark_ending_soon_bulk(cutoff: datetime) -> int:
+    """
+    Mark anything ending soon as 'ending_soon'.
+    We now include 'api_active' in the allowed statuses so that rows created
+    by the API ingester (instead of the legacy HTML scraper) still get picked up.
+    """
     with connection, connection.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = '3000ms'")
-        cur.execute("""
+        cur.execute(
+            """
             UPDATE auction_listings
                SET status = 'ending_soon'
              WHERE end_time <= %s
-               AND status IN ('OPEN','ending_soon','live','active','retry_soon')
-        """, (cutoff,))
+               AND status IN (
+                    'OPEN',
+                    'ending_soon',
+                    'live',
+                    'active',
+                    'retry_soon',
+                    'api_active'      -- < added for API-ingested rows
+               )
+            """,
+            (cutoff,),
+        )
         return cur.rowcount
 
 
@@ -239,21 +277,37 @@ def _apply_results_bulk(results: list[CloseResult]) -> None:
 
     with connection, connection.cursor() as cur:
         if to_finalize_sold:
-            cur.executemany("""
+            cur.executemany(
+                """
                 UPDATE auction_listings
-                   SET status='sold', final_price=%s, last_seen=(now() AT TIME ZONE 'utc')
+                   SET status='sold',
+                       final_price=%s,
+                       last_seen=(now() AT TIME ZONE 'utc')
                  WHERE id=%s
-            """, to_finalize_sold)
+                """,
+                to_finalize_sold,
+            )
         if to_finalize_unsold:
-            cur.executemany("""
+            cur.executemany(
+                """
                 UPDATE auction_listings
-                   SET status='unsold', final_price=NULL, last_seen=(now() AT TIME ZONE 'utc')
+                   SET status='unsold',
+                       final_price=NULL,
+                       last_seen=(now() AT TIME ZONE 'utc')
                  WHERE id=%s
-            """, to_finalize_unsold)
+                """,
+                to_finalize_unsold,
+            )
         if to_mark_live:
-            cur.executemany("UPDATE auction_listings SET status='live' WHERE id=%s", to_mark_live)
+            cur.executemany(
+                "UPDATE auction_listings SET status='live' WHERE id=%s",
+                to_mark_live,
+            )
         if to_mark_retry:
-            cur.executemany("UPDATE auction_listings SET status='retry_soon' WHERE id=%s", to_mark_retry)
+            cur.executemany(
+                "UPDATE auction_listings SET status='retry_soon' WHERE id=%s",
+                to_mark_retry,
+            )
 
     logger.info(
         "[close] batch done: finalized_sold=%d, finalized_unsold=%d, live=%d, retry=%d",
@@ -282,7 +336,10 @@ def _close_one(a: Auction, idx: int, total: int, deadline: float) -> CloseResult
     if antibot or sc == 429:
         global _cooldown_until
         _cooldown_until = time.perf_counter() + GLOBAL_COOLDOWN_S + random.uniform(1.0, 3.0)
-        logger.warning("[close] anti-bot/429 detected — cooling down for ~%.1fs", GLOBAL_COOLDOWN_S)
+        logger.warning(
+            "[close] anti-bot/429 detected — cooling down for ~%.1fs",
+            GLOBAL_COOLDOWN_S,
+        )
         return CloseResult(a.id, "MARK", "retry_soon", None)
 
     if sc is None:
@@ -323,14 +380,16 @@ def _process_due_auctions(due: Sequence[Auction], budget_seconds: float) -> None
     try:
         due = sorted(
             due,
-            key=lambda a: a.end_time or datetime.max.replace(tzinfo=timezone.utc)
+            key=lambda a: a.end_time or datetime.max.replace(tzinfo=timezone.utc),
         )
     except Exception:
         pass
 
     total = len(due)
     if total > MAX_PER_HEARTBEAT:
-        logger.info(f"[close] Limiting close batch to {MAX_PER_HEARTBEAT}/{total} auctions this pass")
+        logger.info(
+            f"[close] Limiting close batch to {MAX_PER_HEARTBEAT}/{total} auctions this pass"
+        )
         due = due[:MAX_PER_HEARTBEAT]
         total = len(due)
     else:
@@ -341,7 +400,10 @@ def _process_due_auctions(due: Sequence[Auction], budget_seconds: float) -> None
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futs = [ex.submit(_close_one, a, i + 1, total, deadline) for i, a in enumerate(due)]
+        futs = [
+            ex.submit(_close_one, a, i + 1, total, deadline)
+            for i, a in enumerate(due)
+        ]
         for fut in as_completed(futs):
             try:
                 r = fut.result()
@@ -368,10 +430,14 @@ def tick() -> None:
         try:
             cutoff = now + GRACE_WINDOW
             rows = get_open_auctions_ending_before(cutoff) or []
-            logger.info(f"[close] ENDING_SOON candidates: {len(rows)} (cutoff={cutoff.isoformat()})")
+            logger.info(
+                f"[close] ENDING_SOON candidates: {len(rows)} (cutoff={cutoff.isoformat()})"
+            )
             updated = _mark_ending_soon_bulk(cutoff)
             logger.info(f"[close] ENDING_SOON bulk updated: {updated}")
-            logger.info(f"[close] ENDING_SOON pass took {time.perf_counter() - t0:.2f}s")
+            logger.info(
+                f"[close] ENDING_SOON pass took {time.perf_counter() - t0:.2f}s"
+            )
         except Exception as e:
             logger.error(f"[close] ENDING_SOON pass failed: {e}")
 
@@ -380,14 +446,18 @@ def tick() -> None:
             due_cutoff = now + CLOSE_DELAY
             rows = get_open_auctions_ending_before(due_cutoff) or []
             due = [_as_auction(r) for r in rows]
-            logger.info(f"[close] Due candidates: {len(due)} (cutoff={due_cutoff.isoformat()})")
+            logger.info(
+                f"[close] Due candidates: {len(due)} (cutoff={due_cutoff.isoformat()})"
+            )
             _process_due_auctions(due, PASS_BUDGET_SECONDS)
         except Exception as e:
             logger.error(f"[close] due auctions pass failed: {e}")
 
         # Stage 3: Stale fallback
         try:
-            stale_rows = get_open_auctions_ending_before(now - STALE_UNENDED_FALLBACK) or []
+            stale_rows = get_open_auctions_ending_before(
+                now - STALE_UNENDED_FALLBACK
+            ) or []
             stale = [_as_auction(r) for r in stale_rows]
             logger.info(f"[close] Stale candidates: {len(stale)}")
             logger.info("[close] Stale pass finalized: 0")

@@ -2,44 +2,52 @@ from __future__ import annotations
 
 import traceback
 from infrastructure.utils.logger import get_logger
+
 from infrastructure.scraper.adapters.niche.ebay.consoles import Adapter as ConsolesAdapter
+from infrastructure.scraper.adapters.niche.ebay.retro_pc import Adapter as RetroPcAdapter
 
 logger = get_logger(__name__)
 
 
-def run_consoles_api(*, ebay_token: str):
+def _run_adapter(adapter, ebay_token: str) -> None:
     """
-    Pull live listings for console categories using the eBay Browse API.
-    This:
-    - Calls eBay's API (not HTML scraping)
-    - Normalises listings
-    - Buffers them in memory
-    - Bulk upserts them into Postgres
+    Generic runner for a single adapter instance.
+    Calls its API fetch and logs errors per-domain so
+    consoles and retro-pc failures don't hide each other.
     """
-    adapter = ConsolesAdapter()
+    domain = getattr(adapter, "DOMAIN", "unknown-domain")
 
     try:
-        logger.info("[scrape-consoles] begin consoles API fetch")
+        logger.info(f"[scrape:{domain}] begin API fetch")
         adapter.fetch_listings_api(ebay_token)
-        logger.info("[scrape-consoles] consoles API fetch complete")
+        logger.info(f"[scrape:{domain}] API fetch complete")
     except Exception as e:
         logger.warning(
-            "[scrape-consoles] consoles API fetch failed: %s\n%s",
-            e,
-            traceback.format_exc()
+            f"[scrape:{domain}] API fetch failed: {e}\n{traceback.format_exc()}"
         )
 
 
 def run(*, ebay_token: str):
     """
     Heartbeat entry point.
-    Right now this only runs the consoles API ingest.
+
+    Currently ingests:
+      - ebay-consoles  (BIN + auction if adapter.SALE_TYPE is a list)
+      - ebay-retro-pc  (same deal)
+
     We are intentionally NOT running:
       - motomine HTML scraping
-      - parse_auction per-URL loops
-      - crypto news scrapers
-    because production eBay approval needs us clean & API-driven.
+      - per-URL close_auctions scrapes
+      - any non-eBay scrapers
+
+    because we want to stay API-first / low-risk.
     """
     logger.info("[scrape] Begin scrape (API mode)")
-    run_consoles_api(ebay_token=ebay_token)
+
+    consoles_adapter = ConsolesAdapter()
+    retro_pc_adapter = RetroPcAdapter()
+
+    _run_adapter(consoles_adapter, ebay_token)
+    _run_adapter(retro_pc_adapter, ebay_token)
+
     logger.info("[scrape] End scrape (API mode)")

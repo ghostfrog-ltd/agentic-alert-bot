@@ -320,38 +320,6 @@ def create_articles():
             )
         """)
 
-
-def resolve_source_id(domain_or_name: str) -> int:
-    with connection.cursor() as cur:
-        ensure_utc_session(cur)
-        # Try exact name
-        cur.execute("SELECT id FROM sources WHERE name = %s", (domain_or_name,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-
-        # Try matching base_url by domain
-        cur.execute("""
-            SELECT id FROM sources
-            WHERE replace(replace(replace(base_url,'https://',''),'http://',''),'www.','') ILIKE
-                  replace(replace(replace(%s,'https://',''),'http://',''),'www.','')
-            LIMIT 1
-        """, (domain_or_name,))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-
-        # Insert minimal record
-        cur.execute("""
-            INSERT INTO sources (name, type, base_url, enabled, created_at_utc, updated_at_utc)
-            VALUES (%s, 'news', %s, TRUE, (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'))
-            RETURNING id
-        """, (domain_or_name, domain_or_name))
-        new_id = cur.fetchone()[0]
-    connection.commit()
-    return new_id
-
-
 def find_by_url(url: str):
     with connection.cursor() as cur:
         cur.execute("""
@@ -369,12 +337,17 @@ def find_by_url(url: str):
     return dict(zip(keys, row))
 
 
-def resolve_source_field(domain: str, field: str) -> Optional[str]:
+def resolve_source_field(key: str, field: str, use_domain: bool = False):
+    col = "domain" if use_domain else "name"
     with connection.cursor() as cur:
-        cur.execute(
-            f"SELECT {field} FROM sources WHERE base_url LIKE %s OR name = %s LIMIT 1",
-            (f'%{domain}%', domain),
-        )
+        cur.execute(f"SELECT {field} FROM sources WHERE {col} = %s LIMIT 1", (key,))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def resolve_source_id(key: str, use_domain: bool = False):
+    col = "domain" if use_domain else "name"
+    with connection.cursor() as cur:
+        cur.execute(f"SELECT id FROM sources WHERE {col} = %s LIMIT 1", (key,))
         row = cur.fetchone()
         return row[0] if row else None
 

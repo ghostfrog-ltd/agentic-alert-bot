@@ -12,7 +12,8 @@ from infrastructure.watchlist import (
     poll_hot_and_alert,
     finalize_hot_batch,
 )
-from infrastructure.ebay.api import fetch_live_snapshot  # must exist
+# ❌ no longer needed, poll_hot_and_alert() imports this internally now
+# from infrastructure.ebay.api import fetch_live_snapshot
 
 logger = get_logger(__name__)
 
@@ -140,7 +141,8 @@ def tick():
         if spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:
-                poll_hot_and_alert(fetch_live_snapshot)
+                # 👇 updated call: no arg now
+                poll_hot_and_alert()
                 phase_dt = perf_counter() - t0
                 logger.info(f"[Heartbeat] poll_hot_and_alert OK in {phase_dt:.2f}s")
             except Exception as e:
@@ -172,7 +174,7 @@ def tick():
                 logger.error(f"[Heartbeat] close_tick FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-        # Phase 4: SCRAPE SOURCES (now DB-gated per adapter)
+        # Phase 4: SCRAPE SOURCES
         if spent_total < HEARTBEAT_BUDGET_S and FEAT_SCRAPE and auth_ok and run_scrape:
             t0 = perf_counter()
             try:

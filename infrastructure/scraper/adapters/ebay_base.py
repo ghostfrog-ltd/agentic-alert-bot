@@ -176,18 +176,30 @@ class EbayAdapterBase:
         return filtered
 
     def flush_batch(self):
+        """
+        Write accumulated listing rows + price history rows to DB
+        in bulk, then clear buffers.
+        """
         if not self._batch_buffer and not self._ph_buffer:
             return
-        # 🔒 enforce seller sanity before writing
-        self._batch_buffer = self._filter_to_this_seller(self._batch_buffer)
 
         t0 = perf_counter()
         n_list = len(self._batch_buffer)
         n_hist = len(self._ph_buffer)
+
         try:
+            # ✅ DEDUPE listings on external_id before bulk upsert
             if n_list:
-                bulk_upsert_auction_listings(self._batch_buffer)
+                deduped = {}
+                for row in self._batch_buffer:
+                    ext_id = row.get("external_id")
+                    # last one wins, doesn't matter which because they're same listing
+                    deduped[ext_id] = row
+                safe_rows = list(deduped.values())
+
+                bulk_upsert_auction_listings(safe_rows)
                 self._batch_buffer.clear()
+
             if n_hist:
                 try:
                     bulk_append_price_history(self._ph_buffer)
@@ -195,11 +207,13 @@ class EbayAdapterBase:
                     logger.warning(f"[{self.DOMAIN}] bulk price_history failed: {e}")
                 finally:
                     self._ph_buffer.clear()
+
         finally:
             dt = perf_counter() - t0
             self._last_flush = time.time()
             logger.info(
-                f"[{self.DOMAIN}] bulk flush in {dt:.3f}s (listings={n_list}, price_history={n_hist})"
+                f"[{self.DOMAIN}] bulk flush in {dt:.3f}s "
+                f"(listings={n_list}, price_history={n_hist})"
             )
 
     # ------------------------------------------------------------------

@@ -1,11 +1,13 @@
 from datetime import datetime, timedelta, timezone
 import traceback
 from infrastructure.utils.logger import get_logger
-from infrastructure.db.schema import connection  # <-- your existing global conn
+from infrastructure.db.schema import connection
 
+# Adapters
 from infrastructure.scraper.adapters.niche.ebay.consoles import Adapter as ConsolesAdapter
 from infrastructure.scraper.adapters.niche.ebay.retro_pc import Adapter as RetroPcAdapter
 from infrastructure.scraper.adapters.niche.ebay.motomine import Adapter as MotoMineAdapter
+from infrastructure.scraper.adapters.niche.ebay.actioncams import Adapter as ActionCamAdapter
 
 logger = get_logger(__name__)
 
@@ -16,7 +18,7 @@ def _run_adapter(adapter, ebay_token: str) -> None:
     domain = getattr(adapter, "DOMAIN", "unknown-domain")
     now = datetime.now(timezone.utc)  # ✅ timezone-aware
 
-    # 1️⃣ read last_scraped_at + scrape_interval_seconds from DB
+    # read last_scraped_at + scrape_interval_seconds from DB
     with connection.cursor() as cur:
         cur.execute("""
             SELECT scrape_interval_seconds, last_scraped_at
@@ -36,7 +38,7 @@ def _run_adapter(adapter, ebay_token: str) -> None:
     if last_run and last_run.tzinfo is None:
         last_run = last_run.replace(tzinfo=timezone.utc)
 
-    # 2️⃣ gate based on interval
+    # gate based on interval
     if last_run and interval > 0:
         elapsed = (now - last_run).total_seconds()
         if elapsed < interval:
@@ -49,13 +51,13 @@ def _run_adapter(adapter, ebay_token: str) -> None:
             )
             return
 
-    # 3️⃣ run the adapter
+    # run the adapter
     try:
         logger.info(f"[scrape:{domain}] begin API fetch")
         adapter.fetch_listings_api(ebay_token)
         logger.info(f"[scrape:{domain}] API fetch complete")
 
-        # 4️⃣ update last_scraped_at on success
+        # update last_scraped_at on success
         with connection.cursor() as cur:
             cur.execute("""
                 UPDATE sources
@@ -79,6 +81,7 @@ def run(*, ebay_token: str):
         ConsolesAdapter(),
         RetroPcAdapter(),
         MotoMineAdapter(),
+        ActionCamAdapter(),
     ]
 
     for adapter in adapters:

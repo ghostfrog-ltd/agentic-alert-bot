@@ -23,10 +23,10 @@ try:
     from infrastructure.ebay.auth import get_auth, EbayAuthError
 except Exception as e:
     get_auth = None
-    EbayAuthError = Exception  # fallback so except still works
+    EbayAuthError = Exception  # fallback
     logger.error(f"[Heartbeat] import get_auth failed: {e}")
 
-# ---------- Optional imports guarded (keep loose coupling)
+# ---------- Optional imports guarded (loose coupling)
 try:
     from agent.actions.scrape_sources import run as run_scrape
 except Exception as e:
@@ -56,35 +56,25 @@ try:
 except Exception:
     scan_flips = None  # optional
 
-try:
-    from agent.state import should_scrape_now
-except Exception:
-    should_scrape_now = None  # optional gate
-
-# compute_daily_comps may not exist on some branches — make optional
+# compute_daily_comps may not exist on some branches
 try:
     from infrastructure.db.schema import compute_daily_comps
 except Exception:
     compute_daily_comps = None
 
 # -----------------------------
-# Deal with env always being true
+# ENV + RUNTIME FLAGS
 # -----------------------------
 def env_flag(name: str, default: str = "0") -> bool:
     val = os.getenv(name, default)
     if val is None:
         return False
-    val = val.strip().lower()
-    return val in ("1", "true", "yes", "on")
+    return val.strip().lower() in ("1", "true", "yes", "on")
 
-# -----------------------------
-# ENV KNOBS (safe defaults)
-# -----------------------------
 SLEEP_BASE_S = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
 SLEEP_JITTER = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
 REFRESH_HRS  = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
 
-# Feature toggles (easy runtime control)
 FEAT_FLIPS  = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
 FEAT_CLOSE  = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
 FEAT_SCRAPE = env_flag("GF_HEARTBEAT_ENABLE_SCRAPE")
@@ -96,9 +86,7 @@ HEARTBEAT_BUDGET_S      = float(os.getenv("GF_HEARTBEAT_BUDGET_S",      "30"))
 PHASE_HOT_BUDGET_S      = float(os.getenv("GF_PHASE_HOT_BUDGET_S",      "5"))
 PHASE_FINALIZE_BUDGET_S = float(os.getenv("GF_PHASE_FINALIZE_BUDGET_S", "5"))
 PHASE_CLOSE_BUDGET_S    = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S",    "10"))
-# scrape / scan / flips / alerts just eat whatever is left after that
 
-# Protection against overlapping heartbeats in the same process
 _lock = threading.Lock()
 _last_comps_at: datetime | None = None
 
@@ -120,18 +108,6 @@ def _maybe_refresh_comps():
             logger.info(f"[Heartbeat] comps refreshed in {perf_counter()-t0:.2f}s")
         except Exception as e:
             logger.error(f"[Heartbeat] comps refresh failed: {e}")
-
-
-def _should_scrape_safe() -> bool:
-    if not FEAT_SCRAPE or not run_scrape:
-        return False
-    if should_scrape_now is None:
-        return True
-    try:
-        return bool(should_scrape_now())
-    except Exception as e:
-        logger.error(f"[Heartbeat] should_scrape_now failed: {e}")
-        return False
 
 
 def tick():
@@ -160,7 +136,7 @@ def tick():
     spent_total = 0.0
 
     try:
-        # Phase 1: HOT WATCHLIST (Tier 2 live tracking + alerts)
+        # Phase 1: HOT WATCHLIST
         if spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:
@@ -172,17 +148,7 @@ def tick():
                 logger.error(f"[Heartbeat] poll_hot_and_alert FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-            if phase_dt > PHASE_HOT_BUDGET_S:
-                logger.warning(
-                    "[Heartbeat] poll_hot_and_alert exceeded phase budget (%.2fs > %.2fs)",
-                    phase_dt, PHASE_HOT_BUDGET_S
-                )
-
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after poll_hot_and_alert")
-            return
-
-        # Phase 2: FINALIZE HOT (hammer price capture for watched items)
+        # Phase 2: FINALIZE HOT
         if spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:
@@ -194,17 +160,7 @@ def tick():
                 logger.error(f"[Heartbeat] finalize_hot_batch FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-            if phase_dt > PHASE_FINALIZE_BUDGET_S:
-                logger.warning(
-                    "[Heartbeat] finalize_hot_batch exceeded phase budget (%.2fs > %.2fs)",
-                    phase_dt, PHASE_FINALIZE_BUDGET_S
-                )
-
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after finalize_hot_batch")
-            return
-
-        # Phase 3: CLOSE AUCTIONS (status cleanup / legacy close flow)
+        # Phase 3: CLOSE AUCTIONS
         if FEAT_CLOSE and close_tick and spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:
@@ -216,43 +172,22 @@ def tick():
                 logger.error(f"[Heartbeat] close_tick FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-            if phase_dt > PHASE_CLOSE_BUDGET_S:
-                logger.warning(
-                    "[Heartbeat] close_tick exceeded phase budget (%.2fs > %.2fs)",
-                    phase_dt, PHASE_CLOSE_BUDGET_S
-                )
-
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after close_tick")
-            return
-
-        # Phase 4: SCRAPE SOURCES (broad discovery / Tier0+1)
-        if spent_total < HEARTBEAT_BUDGET_S:
-            if _should_scrape_safe() and auth_ok and run_scrape:
-                t0 = perf_counter()
-                try:
-                    run_scrape(ebay_token=ebay_token)
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}")
-                spent_total += phase_dt
-            elif _should_scrape_safe() and not auth_ok:
-                logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
-            else:
-                logger.info("[Heartbeat] scrape_sources skipped (gate off or not due)")
-
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after scrape_sources")
-            return
+        # Phase 4: SCRAPE SOURCES (now DB-gated per adapter)
+        if spent_total < HEARTBEAT_BUDGET_S and FEAT_SCRAPE and auth_ok and run_scrape:
+            t0 = perf_counter()
+            try:
+                run_scrape(ebay_token=ebay_token)
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}")
+            spent_total += phase_dt
+        elif FEAT_SCRAPE and not auth_ok:
+            logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
 
         # Phase 5: COMPS REFRESH
         _maybe_refresh_comps()
-
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after comps")
-            return
 
         # Phase 6: SCAN ENDING SOON
         if FEAT_SCAN and run_scan and spent_total < HEARTBEAT_BUDGET_S:
@@ -266,11 +201,7 @@ def tick():
                 logger.error(f"[Heartbeat] scan_ending_soon FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-        if spent_total >= HEARTBEAT_BUDGET_S:
-            logger.info("[Heartbeat] budget exhausted after scan_ending_soon")
-            return
-
-        # Phase 7: FLIPS + DIGEST
+        # Phase 7: FLIPS + ALERTS
         if FEAT_FLIPS and scan_flips and spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:

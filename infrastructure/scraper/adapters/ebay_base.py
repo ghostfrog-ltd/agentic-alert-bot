@@ -17,7 +17,7 @@ from infrastructure.db.schema import (
     bulk_upsert_auction_listings,
     bulk_append_price_history,
 )
-from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ track API usage
+from infrastructure.utils.usage_tracker import increment_api_usage
 
 logger = get_logger(__name__)
 
@@ -56,21 +56,24 @@ def _secs_left(end_time: Optional[datetime]) -> Optional[int]:
 # Base Adapter
 # ----------------------------------------------------------------------
 class EbayAdapterBase:
-    """
-    Base class for all eBay niche adapters.
-    Subclasses define DOMAIN, CATEGORY_IDS, SALE_TYPE, RETRO_KEYWORDS, etc.
-    """
-
     DOMAIN: str = "ebay-base"
+
     CATEGORY_IDS: List[int] = []
-    SALE_TYPE: str | List[str] = "bin"  # or ["bin", "auction"]
+    SELLER_USERNAME: Optional[str] = None
+    FETCH_MODE: str = "category"
+    SALE_TYPE: str | List[str] = "bin"
     RETRO_KEYWORDS: List[str] = []
     MODERN_KEYWORDS: List[str] = []
 
+    # Tunables
     FLUSH_EVERY = 50
     FLUSH_SECONDS = 3
     MIN_TIME_BATCH = 10
     CATEGORY_PAUSE_SECONDS = 1.5
+
+    # Politeness
+    MAX_PAGES = 5
+    MAX_LISTINGS = 200
 
     def __init__(self):
         self._source_name, self._source_id = self._resolve_source()
@@ -82,73 +85,42 @@ class EbayAdapterBase:
         self._hist_db: deque[float] = deque(maxlen=500)
         self._bench_n: int = 0
 
-        # ------------------------------------------------------------------
-        # Source resolution
-        # ------------------------------------------------------------------
-        def _resolve_source(self) -> tuple[str, Optional[int]]:
-            """
-            Bind this adapter to a row in `sources`.
+    # ------------------------------------------------------------------
+    # Source resolution
+    # ------------------------------------------------------------------
+    def _resolve_source(self) -> tuple[str, Optional[int]]:
+        try:
+            sid = resolve_source_id(self.DOMAIN, use_domain=True)
+            if sid is not None:
+                sname = resolve_source_field(self.DOMAIN, "name", use_domain=True)
+                logger.info(f"[{self.DOMAIN}] sources resolved by domain -> name='{sname}', id={sid}")
+                return (str(sname) if sname else self.DOMAIN, int(sid))
+        except Exception as e:
+            logger.warning(f"[{self.DOMAIN}] domain lookup failed: {e}")
 
-            Priority:
-            1. First try to resolve via sources.domain == self.DOMAIN
-            2. Then try sources.name == self.DOMAIN
-            3. Then fall back to legacy "ebay-uk" / "ebay"
-            4. Finally, give up and return (self.DOMAIN, None)
+        try:
+            sname = resolve_source_field(self.DOMAIN, "name", use_domain=False)
+            if sname:
+                sid = resolve_source_id(self.DOMAIN, use_domain=False)
+                logger.info(f"[{self.DOMAIN}] sources resolved by name -> name='{sname}', id={sid}")
+                return (str(sname), int(sid) if sid is not None else None)
+        except Exception:
+            pass
 
-            Returns:
-                (resolved_name, resolved_id_or_None)
-            """
-            from infrastructure.db.schema import (
-                resolve_source_field,
-                resolve_source_id,
-                connection,
-                ensure_utc_session,
-            )
-            # 1️⃣ Try strict domain match
+        for legacy_key in ("ebay-uk", "ebay"):
             try:
-                sid = resolve_source_id(self.DOMAIN, use_domain=True)
-                if sid is not None:
-                    sname = resolve_source_field(self.DOMAIN, "name", use_domain=True)
-                    logger.info(
-                        f"[{self.DOMAIN}] sources resolved by domain -> "
-                        f"name='{sname}', id={sid}"
-                    )
-                    return (str(sname) if sname else self.DOMAIN, int(sid))
-            except Exception as e:
-                logger.warning(f"[{self.DOMAIN}] domain lookup failed: {e}")
-
-            # 2️⃣ Try matching by name
-            try:
-                sname = resolve_source_field(self.DOMAIN, "name", use_domain=False)
+                sname = resolve_source_field(legacy_key, "name", use_domain=False)
                 if sname:
-                    sid = resolve_source_id(self.DOMAIN, use_domain=False)
+                    sid = resolve_source_id(legacy_key, use_domain=False)
                     logger.info(
-                        f"[{self.DOMAIN}] sources resolved by name -> "
-                        f"name='{sname}', id={sid}"
+                        f"[{self.DOMAIN}] sources resolved via legacy key '{legacy_key}' -> name='{sname}', id={sid}"
                     )
                     return (str(sname), int(sid) if sid is not None else None)
             except Exception:
-                pass
+                continue
 
-            # 3️⃣ Legacy fallback so older rows keep working
-            for legacy_key in ("ebay-uk", "ebay"):
-                try:
-                    sname = resolve_source_field(legacy_key, "name", use_domain=False)
-                    if sname:
-                        sid = resolve_source_id(legacy_key, use_domain=False)
-                        logger.info(
-                            f"[{self.DOMAIN}] sources resolved via legacy key "
-                            f"'{legacy_key}' -> name='{sname}', id={sid}"
-                        )
-                        return (str(sname), int(sid) if sid is not None else None)
-                except Exception:
-                    continue
-
-            # 4️⃣ Fallback if nothing matched
-            logger.warning(
-                f"[{self.DOMAIN}] sources row not found; using fallback '{self.DOMAIN}'"
-            )
-            return self.DOMAIN, None
+        logger.warning(f"[{self.DOMAIN}] sources row not found; using fallback '{self.DOMAIN}'")
+        return self.DOMAIN, None
 
     # ------------------------------------------------------------------
     # Classification helpers
@@ -183,9 +155,32 @@ class EbayAdapterBase:
         if (due_by_size or (due_by_time and n_total >= self.MIN_TIME_BATCH)) and n_total:
             self.flush_batch()
 
+    def _filter_to_this_seller(self, collected: list[dict]) -> list[dict]:
+        expected = getattr(self, "SELLER_USERNAME", None)
+        if not expected:
+            return collected
+        expected_norm = expected.lower().strip()
+        filtered: list[dict] = []
+        for item in collected:
+            seller_norm = (item.get("seller_username") or "").lower().strip()
+            if seller_norm == expected_norm:
+                filtered.append(item)
+            else:
+                logger.debug(
+                    "[%s] dropped foreign seller '%s' (kept only '%s') for title=%r",
+                    getattr(self, "DOMAIN", "?"),
+                    seller_norm,
+                    expected_norm,
+                    item.get("title"),
+                )
+        return filtered
+
     def flush_batch(self):
         if not self._batch_buffer and not self._ph_buffer:
             return
+        # 🔒 enforce seller sanity before writing
+        self._batch_buffer = self._filter_to_this_seller(self._batch_buffer)
+
         t0 = perf_counter()
         n_list = len(self._batch_buffer)
         n_hist = len(self._ph_buffer)
@@ -204,8 +199,7 @@ class EbayAdapterBase:
             dt = perf_counter() - t0
             self._last_flush = time.time()
             logger.info(
-                f"[{self.DOMAIN}] bulk flush in {dt:.3f}s "
-                f"(listings={n_list}, price_history={n_hist})"
+                f"[{self.DOMAIN}] bulk flush in {dt:.3f}s (listings={n_list}, price_history={n_hist})"
             )
 
     # ------------------------------------------------------------------
@@ -219,14 +213,14 @@ class EbayAdapterBase:
         }
 
     def _fetch_category_items(
-        self,
-        token: str,
-        category_id: int,
-        sale_type: str | None = None,
-        limit: int = 50,
+            self,
+            token: str,
+            category_id: int,
+            sale_type: str | None = None,
+            limit: int = 50,
     ) -> list[dict[str, Any]]:
         """
-        Hit eBay Browse API for a category.
+        Hit eBay Browse API for a given category.
         sale_type: "bin", "auction", or None for all.
         """
         base = os.getenv("EBAY_API_BASE", "").rstrip("/")
@@ -234,7 +228,7 @@ class EbayAdapterBase:
             logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
             return []
 
-        # map our sale_type to eBay filter
+        # Map our sale_type to eBay's listingType filter
         listing_filter = None
         if sale_type == "bin":
             listing_filter = "FIXED_PRICE"
@@ -258,13 +252,10 @@ class EbayAdapterBase:
             logger.warning(f"[{self.DOMAIN}] API request failed cat={category_id} ({sale_type}): {e}")
             return []
 
-        d_api = perf_counter() - t_api_start
-        self._hist_api.append(d_api)
-
+        self._hist_api.append(perf_counter() - t_api_start)
         if r.status_code != 200:
             logger.warning(
-                f"[{self.DOMAIN}] API {category_id} ({sale_type}) "
-                f"status {r.status_code}: {r.text[:200]}"
+                f"[{self.DOMAIN}] API cat={category_id} ({sale_type}) status {r.status_code}: {r.text[:200]}"
             )
             return []
 
@@ -278,20 +269,101 @@ class EbayAdapterBase:
 
         items = payload.get("itemSummaries") or payload.get("item_summary") or []
         if not isinstance(items, list):
-            logger.warning(f"[{self.DOMAIN}] unexpected payload for cat={category_id} ({sale_type})")
+            logger.warning(
+                f"[{self.DOMAIN}] unexpected payload for cat={category_id} ({sale_type})"
+            )
             return []
 
         return items
 
-    def _normalize_item(
+    def _fetch_seller_items(
         self,
-        raw: dict[str, Any],
-        sale_type: str,
-    ) -> Optional[tuple[dict[str, Any], tuple[str, int, int]]]:
-        """
-        Normalize a single eBay item into internal row shape.
-        sale_type = "bin" or "auction" for this batch.
-        """
+        token: str,
+        seller_username: str,
+        sale_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        base = os.getenv("EBAY_API_BASE", "").rstrip("/")
+        if not base:
+            logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
+            return []
+
+        buying_opt = None
+        if sale_type == "bin":
+            buying_opt = "FIXED_PRICE"
+        elif sale_type == "auction":
+            buying_opt = "AUCTION"
+
+        filter_bits = [f"seller_username:{{{seller_username}}}"]
+        if buying_opt:
+            filter_bits.append(f"buyingOptions:{{{buying_opt}}}")
+        filter_param = ",".join(filter_bits)
+
+        all_items: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+
+        offset = 0
+        page_count = 0
+        while True:
+            qs = [
+                "q=a",
+                f"filter={filter_param}",
+                f"limit={limit}",
+                f"offset={offset}",
+                "sort=endingSoon",
+            ]
+            url = f"{base}/buy/browse/v1/item_summary/search?" + "&".join(qs)
+
+            t_api_start = perf_counter()
+            try:
+                r = requests.get(url, headers=self._build_headers(token), timeout=10)
+            except Exception as e:
+                logger.warning(f"[{self.DOMAIN}] API request failed seller={seller_username} ({sale_type}): {e}")
+                break
+
+            self._hist_api.append(perf_counter() - t_api_start)
+            if r.status_code != 200:
+                logger.warning(
+                    f"[{self.DOMAIN}] API seller={seller_username} status {r.status_code}: {r.text[:200]}"
+                )
+                break
+            increment_api_usage("ebay")
+
+            try:
+                payload = r.json()
+            except Exception as e:
+                logger.warning(f"[{self.DOMAIN}] bad JSON seller={seller_username}: {e}")
+                break
+
+            items = payload.get("itemSummaries") or payload.get("item_summary") or []
+            if not isinstance(items, list) or not items:
+                break
+
+            new_batch = []
+            for it in items:
+                iid = it.get("itemId")
+                if not iid or iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+                new_batch.append(it)
+
+            if not new_batch:
+                break
+            all_items.extend(new_batch)
+
+            page_count += 1
+            if page_count >= getattr(self, "MAX_PAGES", 10):
+                logger.info(f"[{self.DOMAIN}] seller={seller_username} reached page cap ({page_count})")
+                break
+            if len(all_items) >= getattr(self, "MAX_LISTINGS", 1000):
+                logger.info(f"[{self.DOMAIN}] seller={seller_username} reached MAX_LISTINGS")
+                break
+
+            offset += limit
+            time.sleep(0.25)
+        return all_items
+
+    def _normalize_item(self, raw: dict[str, Any], sale_type: str):
         item_id = raw.get("itemId")
         title = raw.get("title") or ""
         buying_opts = raw.get("buyingOptions") or []
@@ -300,12 +372,10 @@ class EbayAdapterBase:
         price_info = raw.get("price") or {}
         price_value = price_info.get("value")
         web_url = raw.get("itemWebUrl") or raw.get("itemUrl") or ""
-        end_time_iso = raw.get("itemEndDate")
-        end_time = _parse_iso_utc(end_time_iso)
+        end_time = _parse_iso_utc(raw.get("itemEndDate"))
         time_left_s = _secs_left(end_time)
         bids_count = 0
 
-        # ensure sale_type consistency vs eBay response
         if sale_type == "bin" and buying_opts == ["AUCTION"]:
             return None
         if sale_type == "auction" and "AUCTION" not in buying_opts:
@@ -339,6 +409,7 @@ class EbayAdapterBase:
             "model_key": model_key,
             "time_left_s": time_left_s,
             "status": "live",
+            "seller_username": (seller_username or "").strip()[:255],
         }
 
         ph = (item_id, price_current_int or 0, bids_count)
@@ -349,28 +420,26 @@ class EbayAdapterBase:
     # ------------------------------------------------------------------
     def fetch_listings_api(self, ebay_token: str) -> None:
         sale_types = (
-            self.SALE_TYPE
-            if isinstance(self.SALE_TYPE, (list, tuple))
-            else [self.SALE_TYPE]
+            self.SALE_TYPE if isinstance(self.SALE_TYPE, (list, tuple)) else [self.SALE_TYPE]
         )
 
-        for cat_id in self.CATEGORY_IDS:
-            for sale_type in sale_types:
-                cat_t0 = perf_counter()
+        # -------------------------
+        # SELLER MODE
+        # -------------------------
+        if self.FETCH_MODE == "seller":
+            seller = self.SELLER_USERNAME
+            if not seller:
+                logger.warning(f"[{self.DOMAIN}] seller mode but no SELLER_USERNAME set")
+                return
 
-                items = self._fetch_category_items(
-                    token=ebay_token,
-                    category_id=cat_id,
-                    sale_type=sale_type,
-                )
+            for sale_type in sale_types:
+                t0 = perf_counter()
+                items = self._fetch_seller_items(ebay_token, seller, sale_type)
                 if not items:
-                    logger.info(f"[{self.DOMAIN}] cat {cat_id} {sale_type}: 0 items")
-                    time.sleep(self.CATEGORY_PAUSE_SECONDS)
+                    logger.info(f"[{self.DOMAIN}] seller {seller} {sale_type}: 0 items")
                     continue
 
-                norm_start = perf_counter()
                 added = 0
-
                 for raw in items:
                     norm = self._normalize_item(raw, sale_type)
                     if not norm:
@@ -382,17 +451,38 @@ class EbayAdapterBase:
                     added += 1
                     self._maybe_flush()
 
-                d_norm = perf_counter() - norm_start
-                d_cat = perf_counter() - cat_t0
-                self._hist_norm.append(d_norm)
-                self._hist_db.append(d_cat)
-                self._bench_n += 1
-
                 logger.info(
-                    f"[{self.DOMAIN}] cat {cat_id} {sale_type}: {added} listings "
-                    f"(api+norm total {d_cat:.2f}s)"
+                    f"[{self.DOMAIN}] seller {seller} {sale_type}: {added} listings"
                 )
 
+            self.flush_batch()
+            return
+
+        # -------------------------
+        # CATEGORY MODE
+        # -------------------------
+        for cat_id in self.CATEGORY_IDS:
+            for sale_type in sale_types:
+                t0 = perf_counter()
+                items = self._fetch_category_items(ebay_token, cat_id, sale_type)
+                if not items:
+                    logger.info(f"[{self.DOMAIN}] cat {cat_id} {sale_type}: 0 items")
+                    time.sleep(self.CATEGORY_PAUSE_SECONDS)
+                    continue
+
+                added = 0
+                for raw in items:
+                    norm = self._normalize_item(raw, sale_type)
+                    if not norm:
+                        continue
+                    row, ph = norm
+                    self._batch_buffer.append(row)
+                    if row["price_current"]:
+                        self._ph_buffer.append(ph)
+                    added += 1
+                    self._maybe_flush()
+
+                logger.info(f"[{self.DOMAIN}] cat {cat_id} {sale_type}: {added} listings")
                 time.sleep(self.CATEGORY_PAUSE_SECONDS)
 
         self.flush_batch()

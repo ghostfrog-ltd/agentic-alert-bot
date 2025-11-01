@@ -40,7 +40,7 @@ def get_open_auctions(now: datetime) -> list[dict]:
     sql = """
     SELECT id, external_id, detail_url, end_time, status
     FROM auction_listings
-    WHERE status IN ('OPEN','ending_soon','live','active')
+    WHERE status IN ('open','ending_soon','live','active')
     """
     with connection.cursor() as cur:
         ensure_utc_session(cur)
@@ -50,20 +50,51 @@ def get_open_auctions(now: datetime) -> list[dict]:
     return [dict(zip(cols, r)) for r in rows]
 
 
-def get_open_auctions_ending_before(now: datetime) -> list[dict]:
-    sql = """
-    SELECT id, external_id, detail_url, end_time
-    FROM auction_listings
-    WHERE status IN ('OPEN','ending_soon','live','active')
-      AND end_time IS NOT NULL
-      AND end_time <= %s
+def get_open_auctions_ending_before(cutoff: datetime) -> list[dict]:
     """
+    Return auctions that are still considered 'open-ish' and whose end_time is before cutoff.
+    Must include finalized so close_auctions can ignore already-finalized rows.
+    """
+    sql = """
+        SELECT
+            id,
+            external_id,
+            end_time,
+            finalized,
+            watch,
+            status
+        FROM auction_listings
+        WHERE end_time <= %s
+          AND (finalized = FALSE OR finalized IS NULL)
+          AND status IN (
+              'open',
+              'ending_soon',
+              'live',
+              'active',
+              'retry_soon',
+              'api_active'
+          )
+        LIMIT 200
+    """
+
     with connection.cursor() as cur:
-        ensure_utc_session(cur)
-        cur.execute(sql, (to_aware_utc(now),))
+        cur.execute(sql, (cutoff,))
         rows = cur.fetchall()
-        cols = [c.name for c in cur.description]
-    return [dict(zip(cols, r)) for r in rows]
+
+    # psycopg2 default fetchall() gives tuples unless cursor is RealDictCursor.
+    # If yours is already using RealDictCursor higher up, you're done.
+    # If not, adapt to match your project style:
+    out = []
+    for r in rows:
+        out.append({
+            "id": r[0],
+            "external_id": r[1],
+            "end_time": r[2],
+            "finalized": r[3],
+            "watch": r[4],
+            "status": r[5],
+        })
+    return out
 
 
 def get_recent_max_price_by_external_id(external_id: str, window_minutes: int = 10) -> Optional[float]:
@@ -751,7 +782,7 @@ def get_active_auctions():
         cur.execute("""
             SELECT id, source_id, external_id, title, price_current, bids_count, end_time, url
             FROM auction_listings
-            WHERE status IN ('active','live','OPEN','ending_soon')
+            WHERE status IN ('active','live','open','ending_soon')
             ORDER BY end_time ASC NULLS LAST
         """)
         return cur.fetchall()

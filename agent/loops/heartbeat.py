@@ -5,6 +5,7 @@ from time import perf_counter
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from infrastructure.utils.logger import get_logger
@@ -12,6 +13,7 @@ from infrastructure.watchlist import (
     poll_hot_and_alert,
     finalize_hot_batch,
 )
+
 # ❌ no longer needed, poll_hot_and_alert() imports this internally now
 # from infrastructure.ebay.api import fetch_live_snapshot
 
@@ -55,13 +57,15 @@ except Exception as e:
 try:
     from agent.actions.scan_flips import run as scan_flips
 except Exception:
-    scan_flips = None  # optional
+    scan_flips = None
+    logger.error(f"[Heartbeat] import scan_flips failed: {e}")
 
 # compute_daily_comps may not exist on some branches
 try:
     from infrastructure.db.schema import compute_daily_comps
 except Exception:
     compute_daily_comps = None
+
 
 # -----------------------------
 # ENV + RUNTIME FLAGS
@@ -72,21 +76,22 @@ def env_flag(name: str, default: str = "0") -> bool:
         return False
     return val.strip().lower() in ("1", "true", "yes", "on")
 
+
 SLEEP_BASE_S = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
 SLEEP_JITTER = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
-REFRESH_HRS  = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
+REFRESH_HRS = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
 
-FEAT_FLIPS  = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
-FEAT_CLOSE  = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
+FEAT_FLIPS = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
+FEAT_CLOSE = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
 FEAT_SCRAPE = env_flag("GF_HEARTBEAT_ENABLE_SCRAPE")
-FEAT_COMPS  = env_flag("GF_HEARTBEAT_ENABLE_COMPS")
-FEAT_SCAN   = env_flag("GF_HEARTBEAT_ENABLE_SCAN_ENDING")
+FEAT_COMPS = env_flag("GF_HEARTBEAT_ENABLE_COMPS")
+FEAT_SCAN = env_flag("GF_HEARTBEAT_ENABLE_SCAN_ENDING")
 FEAT_ALERTS = env_flag("GF_HEARTBEAT_ENABLE_ALERTS")
 
-HEARTBEAT_BUDGET_S      = float(os.getenv("GF_HEARTBEAT_BUDGET_S",      "30"))
-PHASE_HOT_BUDGET_S      = float(os.getenv("GF_PHASE_HOT_BUDGET_S",      "5"))
-PHASE_FINALIZE_BUDGET_S = float(os.getenv("GF_PHASE_FINALIZE_BUDGET_S", "5"))
-PHASE_CLOSE_BUDGET_S    = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S",    "10"))
+HEARTBEAT_BUDGET_S = float(os.getenv("GF_HEARTBEAT_BUDGET_S", "120"))
+PHASE_HOT_BUDGET_S = float(os.getenv("GF_PHASE_HOT_BUDGET_S", "20"))
+PHASE_FINALIZE_BUDGET_S = float(os.getenv("GF_PHASE_FINALIZE_BUDGET_S", "20"))
+PHASE_CLOSE_BUDGET_S = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S", "40"))
 
 _lock = threading.Lock()
 _last_comps_at: datetime | None = None
@@ -106,7 +111,7 @@ def _maybe_refresh_comps():
         try:
             compute_daily_comps()
             _last_comps_at = now
-            logger.info(f"[Heartbeat] comps refreshed in {perf_counter()-t0:.2f}s")
+            logger.info(f"[Heartbeat] comps refreshed in {perf_counter() - t0:.2f}s")
         except Exception as e:
             logger.error(f"[Heartbeat] comps refresh failed: {e}")
 

@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from infrastructure.utils.logger import get_logger
 from infrastructure.ebay.auth import get_auth
-from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ NEW
+from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ counts successful calls
 
 logger = get_logger(__name__)
 
@@ -63,8 +63,6 @@ def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
     Raises EbayApiRateLimited / EbayApiTempError on network/rate issues.
     """
     auth = get_auth()
-    # get_auth() in your project returns an object with .get_token() in some places,
-    # and sometimes just the token. We'll support both defensively:
     token = auth.get_token() if hasattr(auth, "get_token") else auth
 
     headers = {
@@ -89,8 +87,6 @@ def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
         headers=headers,
         timeout=(4, 6),
     )
-
-    # We count *successful* calls in usage. Only increment after status 200 parse succeeds.
 
     if resp.status_code == 429:
         raise EbayApiRateLimited("429 from Trading API GetItem")
@@ -163,7 +159,7 @@ def _interpret_trading_item(item_node: ET.Element) -> dict:
     elif "ended" in selling_state and "withsales" in selling_state:
         sold = True
 
-    # parse final price (this is the ONLY source of truth once ended)
+    # final price
     final_price = None
     if current_price_txt:
         try:
@@ -171,7 +167,7 @@ def _interpret_trading_item(item_node: ET.Element) -> dict:
         except ValueError:
             final_price = None
 
-    # If it's still live, we shouldn't treat current price as a final sale value.
+    # if still live, we don't trust that as final
     if live:
         final_price_to_report = None
     else:
@@ -184,7 +180,8 @@ def _interpret_trading_item(item_node: ET.Element) -> dict:
         "live": live,
     }
 
-    logger.info(
+    # ↓ quieter: debug only
+    logger.debug(
         "[eBayAPI] Trading snapshot item live=%s ended=%s sold=%s final=%s",
         live,
         ended,
@@ -214,19 +211,15 @@ def _call_browse(item_id: str) -> Optional[dict]:
 
     resp = requests.get(url, headers=headers, timeout=(4, 6))
 
-    # We only increment usage on 2xx below.
-
     if resp.status_code == 429:
         raise EbayApiRateLimited("429 from Browse API")
     if resp.status_code >= 500:
         raise EbayApiTempError(f"Browse API {resp.status_code} (5xx)")
 
     if resp.status_code == 404:
-        # Classic "ended so we hide it" case.
         return None
 
     if resp.status_code != 200:
-        # Could be "not allowed", weird category, policy, etc.
         logger.debug(
             "[eBayAPI] Browse API non-200 (%s) for %s body=%s",
             resp.status_code,
@@ -235,7 +228,7 @@ def _call_browse(item_id: str) -> Optional[dict]:
         )
         return None
 
-    # ✅ success, count this
+    # success, count usage
     increment_api_usage("ebay")
 
     try:
@@ -249,7 +242,7 @@ def _call_browse(item_id: str) -> Optional[dict]:
 def _interpret_browse_json(data: dict, row: dict) -> dict:
     """
     Convert Browse API JSON into partial snapshot.
-    This is mainly for *live* listings. Browse often doesn't tell us final sale.
+    This is mainly for *live* listings. Browse often doesn't tell us final sale price.
     """
     price = None
     bid_count = None
@@ -263,7 +256,7 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
             except Exception:
                 pass
 
-    # Fallback: regular price (BIN or current listing price)
+    # Fallback: BIN/current listing price
     if price is None and "price" in data and isinstance(data["price"], dict):
         val = data["price"].get("value")
         if val is not None:
@@ -279,18 +272,18 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
         except Exception:
             bid_count = None
 
-    # Heuristic: Browse is for active stuff, so default live=True/ended=False here.
     snapshot = {
         "ended": False,
         "sold": False,
-        "final_price": None,  # Browse can't be trusted for true final
+        "final_price": None,      # Browse can't be trusted for true final
         "live": True,
         "current_price": price,
         "bid_count": bid_count,
         "market_price": row.get("market_price"),
     }
 
-    logger.info(
+    # ↓ quieter: debug only
+    logger.debug(
         "[eBayAPI] Browse snapshot listing=%s live_price=£%s bids=%s market=£%s",
         row.get("id"),
         price,
@@ -301,37 +294,17 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
     return snapshot
 
 
-# -----------------
-# Public: fetch_live_snapshot
-# -----------------
 def fetch_live_snapshot(row: dict) -> dict:
     """
-    Unified snapshot getter used by your closer / watchlist / heartbeat.
+    Unified snapshot getter.
 
-    1. Try Browse API (JSON). Great for live items, cheap, fast.
-       - If we get data: return snapshot with live price.
-
-    2. If Browse returns 404 / hidden / no data:
-       Hit Trading API GetItem (XML) to get the FINAL sale price.
-       - That gives us ended/sold/final_price even after eBay hides it publicly.
-
-    Return dict ALWAYS shaped like:
-    {
-        "ended": bool,
-        "sold": bool,
-        "final_price": float|None,    # final GBP price if ended
-        "live": bool,
-        "current_price": float|None,  # for live items
-        "bid_count": int|None,
-        "market_price": float|None,   # whatever we had in DB
-    }
+    1. Try Browse API (JSON). Great for live listings.
+    2. If Browse returns nothing (404/hidden/etc), fall back to Trading API GetItem, which
+       tells us ended/sold/final_price even after it's not public.
     """
-
-    # --- pull item_id from row ---
     item_id = row.get("item_id") or row.get("external_id") or row.get("ebay_id")
     if not item_id:
         logger.warning("[eBayAPI] no item_id for listing id=%s", row.get("id"))
-        # Fallback: we return a "can't tell" snapshot
         return {
             "ended": False,
             "sold": False,
@@ -342,7 +315,7 @@ def fetch_live_snapshot(row: dict) -> dict:
             "market_price": row.get("market_price"),
         }
 
-    # --- Step 1: Try Browse API (good for active listings) ---
+    # Step 1: Browse (likely live)
     browse_data = None
     try:
         browse_data = _call_browse(item_id)
@@ -354,16 +327,13 @@ def fetch_live_snapshot(row: dict) -> dict:
         logger.warning("[eBayAPI] Browse network fail for %s: %s", item_id, e)
 
     if browse_data:
-        # We got JSON back from Browse => almost certainly still live.
-        snap = _interpret_browse_json(browse_data, row)
-        return snap
+        return _interpret_browse_json(browse_data, row)
 
-    # --- Step 2: Fallback to Trading API (final truth for ended stuff) ---
+    # Step 2: Trading (truth for ended stuff)
     try:
         item_node = _call_trading_getitem(item_id)
     except EbayApiRateLimited as e:
         logger.warning("[eBayAPI] Trading rate-limited for %s: %s", item_id, e)
-        # If we're rate limited here, we can't know final; ask caller to retry later.
         return {
             "ended": False,
             "sold": False,
@@ -397,7 +367,7 @@ def fetch_live_snapshot(row: dict) -> dict:
         }
 
     if item_node is None:
-        # Couldn’t get item details even from Trading API (nuked listing etc.)
+        # eBay nuked visibility but it's over
         return {
             "ended": True,
             "sold": False,
@@ -410,16 +380,13 @@ def fetch_live_snapshot(row: dict) -> dict:
 
     trading_snap = _interpret_trading_item(item_node)
 
-    # Merge Trading snapshot (which has ended/sold/final_price/live)
-    # with some of our row context (market_price etc.)
+    # Merge Trading truth with our context
     out = {
         "ended": trading_snap["ended"],
         "sold": trading_snap["sold"],
         "final_price": trading_snap["final_price"],
         "live": trading_snap["live"],
-        # For ended listings final_price is truth; for live ones we don't treat
-        # current bid as final. We'll just return None here unless you want both.
-        "current_price": None,
+        "current_price": None,  # for ended listings final_price is truth
         "bid_count": row.get("bid_count"),
         "market_price": row.get("market_price"),
     }

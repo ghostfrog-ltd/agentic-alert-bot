@@ -1,4 +1,3 @@
-# infrastructure/watchlist.py
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -40,13 +39,14 @@ def _coldness(current_price: float, market_price: float) -> Optional[float]:
 
 def _fetch_hot_candidates() -> List[dict]:
     """
-    Grab auctions that are:
-    - watched
+    Grab watched auctions that are:
+    - watch = TRUE
     - not finalized
-    - ending soon (within HOT_WINDOW)
-    We also pull their external_id so we can hit eBay's API.
+    - ending within HOT_WINDOW
+    Returns dict rows with external_id etc. for polling.
     """
     now = _utcnow()
+    cutoff = now + HOT_WINDOW
     with connection, connection.cursor() as cur:
         cur.execute(
             """
@@ -65,11 +65,11 @@ def _fetch_hot_candidates() -> List[dict]:
             WHERE watch = TRUE
               AND finalized = FALSE
               AND end_time > %s
-              AND end_time <= %s + interval '10 minutes'
+              AND end_time <= %s
             ORDER BY end_time ASC
             LIMIT %s
             """,
-            (now, now, POLL_BATCH_LIMIT),
+            (now, cutoff, POLL_BATCH_LIMIT),
         )
         colnames = [c[0] for c in cur.description]
         return [dict(zip(colnames, rec)) for rec in cur.fetchall()]
@@ -82,8 +82,8 @@ def _update_listing_after_poll(
     next_check_at: datetime,
 ) -> None:
     """
-    Update the watch row with freshest live info and next poll time.
-    We'll mark confidence='live' the first time we successfully poll it.
+    After polling live, keep freshest info on the row.
+    Also mark confidence='live' the first time we successfully poll it.
     """
     with connection, connection.cursor() as cur:
         cur.execute(
@@ -106,8 +106,8 @@ def _update_listing_after_poll(
 def _schedule_next_check(end_time: datetime) -> datetime:
     """
     Dynamic poll frequency:
-    - Far away? Chill.
-    - Closing soon? Hammer harder.
+    - Far away? chill.
+    - Close? hammer.
     """
     now = _utcnow()
     mins_left = max(0.0, (end_time - now).total_seconds() / 60.0)
@@ -126,9 +126,8 @@ def _schedule_next_check(end_time: datetime) -> datetime:
 
 def _should_alert(coldness_val: Optional[float], end_time: datetime) -> bool:
     """
-    Decide if we should shout about this to you.
-    - It needs to be cold (well under market)
-    - and it's ending soon (within ALERT_WINDOW)
+    Decide if we should shout.
+    Needs to be cold (well under market) AND almost ending.
     """
     if coldness_val is None:
         return False
@@ -139,8 +138,7 @@ def _should_alert(coldness_val: Optional[float], end_time: datetime) -> bool:
 
 def _send_alert(row: dict, coldness_val: float, snap: dict) -> None:
     """
-    Placeholder alert handler.
-    This is where you'd fire Telegram/email/whatever.
+    Hook for Telegram/email/etc. For now we just log loud.
     """
     logger.warning(
         "[ALERT] Candidate %s still cold (%.1f%% under) with %s left. "
@@ -152,15 +150,14 @@ def _send_alert(row: dict, coldness_val: float, snap: dict) -> None:
         snap.get("market_price"),
         snap.get("bid_count"),
     )
-    # TODO: integrate send_email() or Telegram alert
 
 
 def poll_hot_and_alert() -> None:
     """
     Phase 1 of heartbeat:
-    - Look at stuff ending soon
-    - Hit eBay API live to refresh its current price / bid count
-    - If it's stupidly underpriced, yell
+    - Look at watched stuff ending soon
+    - Hit eBay API live to refresh its bid/price
+    - If it's way under market and about to end, scream
     - Schedule next poll time
     """
     start = _utcnow()
@@ -172,12 +169,11 @@ def poll_hot_and_alert() -> None:
     logger.info("[watchlist] hot candidates: %d", len(rows))
 
     for row in rows:
-        # safety budget, don't sit here forever
+        # protect heartbeat budget
         if (_utcnow() - start).total_seconds() > MAX_PHASE_SECONDS:
             logger.info("[watchlist] poll_hot phase time budget reached")
             break
 
-        # build the shape fetch_live_snapshot() expects
         snapshot_request_row = {
             "id": row["id"],
             "item_id": row.get("external_id"),
@@ -220,8 +216,8 @@ def poll_hot_and_alert() -> None:
 
 def _fetch_ended_unfinalized() -> List[dict]:
     """
-    Grab watched auctions that have *already ended*, not finalized yet.
-    We now also want external_id so we can ask eBay for final_price.
+    Watched auctions that *should* have ended but aren't locked in yet.
+    We'll confirm final_price, sold/unsold, then finalize them.
     """
     now = _utcnow()
     with connection, connection.cursor() as cur:
@@ -254,11 +250,7 @@ def _finalize_listing(
     confidence: str,
 ) -> None:
     """
-    Mark a watched auction as done:
-    - set sold/unsold
-    - record final_price
-    - flip finalized/watch flags
-    - timestamp closed_at
+    Flip watched auction to fully closed state.
     """
     with connection, connection.cursor() as cur:
         cur.execute(
@@ -279,9 +271,10 @@ def _finalize_listing(
 def finalize_hot_batch() -> None:
     """
     Phase 2 of heartbeat:
-    - For watched items that *should* have ended now,
-      ask eBay for their final state.
-    - Lock them in as sold/unsold with final_price.
+    - For watched items that ended,
+      ask eBay for their final sale state.
+    - Record final_price + sold/unsold,
+      then retire them.
     """
     start = _utcnow()
     rows = _fetch_ended_unfinalized()
@@ -292,7 +285,7 @@ def finalize_hot_batch() -> None:
     logger.info("[watchlist] finalizing %d ended watched auctions", len(rows))
 
     for row in rows:
-        # don't blow MAX_PHASE_SECONDS
+        # stay within budget
         if (_utcnow() - start).total_seconds() > MAX_PHASE_SECONDS:
             logger.info("[watchlist] finalize phase time budget reached")
             break
@@ -302,7 +295,6 @@ def finalize_hot_batch() -> None:
             "item_id": row.get("external_id"),
             "external_id": row.get("external_id"),
             "ebay_id": row.get("external_id"),
-            # we don't really care about current live bid now; it's ended
             "current_price": row.get("last_known_price"),
             "market_price": None,
             "bid_count": None,
@@ -325,14 +317,12 @@ def finalize_hot_batch() -> None:
         final_price = snap.get("final_price")
 
         if not ended:
-            # eBay still thinks it's live (edge case: time drift, relisted, etc).
+            # eBay thinks it's somehow still live (relist/lag/etc)
             logger.info("[watchlist] id=%s claims still live post-end", row["id"])
             continue
 
-        # Decide sold status string for DB
         sold_status = "sold" if sold else "unsold"
 
-        # final_price may be float or None. We push whatever Trading API gave us.
         _finalize_listing(
             row_id=row["id"],
             final_price=final_price,

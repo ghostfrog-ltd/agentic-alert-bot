@@ -15,10 +15,16 @@ TIMEOUT_S = 15
 if not SMTP_HOST:
     raise RuntimeError("ALERT_SMTP_HOST not set (e.g. smtp.zoho.eu)")
 
+
 def _send_via_starttls(msg):
     # Force IPv4 to dodge occasional IPv6 issues
     try:
-        ipv4 = socket.getaddrinfo(SMTP_HOST, SMTP_PORT, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        ipv4 = socket.getaddrinfo(
+            SMTP_HOST,
+            SMTP_PORT,
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )[0][4][0]
     except Exception:
         ipv4 = None
 
@@ -31,11 +37,17 @@ def _send_via_starttls(msg):
             s.login(SMTP_USER, SMTP_PASS)
         s.send_message(msg)
 
+
 def _send_via_ssl(msg):
     port = 465
     # Same IPv4 trick
     try:
-        ipv4 = socket.getaddrinfo(SMTP_HOST, port, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+        ipv4 = socket.getaddrinfo(
+            SMTP_HOST,
+            port,
+            socket.AF_INET,
+            socket.SOCK_STREAM
+        )[0][4][0]
     except Exception:
         ipv4 = None
     host_for_connect = ipv4 or SMTP_HOST
@@ -46,9 +58,29 @@ def _send_via_ssl(msg):
             s.login(SMTP_USER, SMTP_PASS)
         s.send_message(msg)
 
-def send_email(subject: str, body: str, to_addr: str | None = None):
+
+def send_email(
+    subject: str,
+    body: str,
+    to_addr: str | None = None,
+    *,
+    is_html: bool = False,
+):
+    """
+    Send an email.
+
+    Params:
+      subject: Subject line (string)
+      body: Body content (string)
+      to_addr: Override recipient. If None, defaults to ALERT_TO.
+      is_html: If True, send as text/html. Otherwise send as text/plain.
+    """
     recipient = (to_addr or TO_ADDR).strip()
-    msg = MIMEText(body)
+
+    # "plain" vs "html" content type
+    subtype = "html" if is_html else "plain"
+    msg = MIMEText(body, subtype, "utf-8")
+
     msg["Subject"] = subject
     msg["From"] = FROM_ADDR
     msg["To"] = recipient
@@ -58,7 +90,6 @@ def send_email(subject: str, body: str, to_addr: str | None = None):
         _send_via_starttls(msg)
         return
     except Exception as e1:
-        # Fallback to SMTPS (465)
         try:
             _send_via_ssl(msg)
             return

@@ -3,14 +3,17 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any, TypedDict
 
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values
 
 from infrastructure.utils import db_connection
+from infrastructure.utils.logger import get_logger
 
 # Global shared connection (do NOT close this in helpers)
 connection = db_connection.connection
+
+logger = get_logger(__name__)
 
 
 # ---------------------------
@@ -81,9 +84,6 @@ def get_open_auctions_ending_before(cutoff: datetime) -> list[dict]:
         cur.execute(sql, (cutoff,))
         rows = cur.fetchall()
 
-    # psycopg2 default fetchall() gives tuples unless cursor is RealDictCursor.
-    # If yours is already using RealDictCursor higher up, you're done.
-    # If not, adapt to match your project style:
     out = []
     for r in rows:
         out.append({
@@ -99,7 +99,7 @@ def get_open_auctions_ending_before(cutoff: datetime) -> list[dict]:
 
 def get_recent_max_price_by_external_id(external_id: str, window_minutes: int = 10) -> Optional[float]:
     """
-    New: use auction_price_history (external_id, recorded_at timestamptz).
+    Use auction_price_history (external_id, recorded_at timestamptz).
     """
     sql = """
     SELECT MAX(price) FROM auction_price_history
@@ -142,13 +142,13 @@ def mark_status(auction_id: int, status: str):
              WHERE id = %s
         """, (status, auction_id))
 
-# infrastructure/db/schema.py
-from psycopg2.extras import execute_values
 
 def bulk_append_price_history(rows: list[tuple[str, int, int]]):
+    """
+    rows: (external_id, price, bids_count)
+    """
     if not rows:
         return
-    # rows are: (external_id, price, bids_count)
     sql = """
         INSERT INTO auction_price_history (external_id, price, bids_count, recorded_at)
         VALUES %s
@@ -158,7 +158,6 @@ def bulk_append_price_history(rows: list[tuple[str, int, int]]):
     with conn, conn.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("SET LOCAL synchronous_commit TO OFF;")
-        # Provide recorded_at via template so rows stay 3-tuples
         execute_values(
             cur,
             sql,
@@ -167,7 +166,11 @@ def bulk_append_price_history(rows: list[tuple[str, int, int]]):
             page_size=500,
         )
 
+
 def bulk_upsert_auction_listings(rows: list[dict]):
+    """
+    Bulk upsert of listings data from scrapers.
+    """
     if not rows:
         return
     cols = [
@@ -197,18 +200,18 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             status        = COALESCE(EXCLUDED.status,        auction_listings.status),
             last_seen     = (now() AT TIME ZONE 'utc')
     """
-    from psycopg2.extras import execute_values
     conn = connection
     with conn, conn.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("SET LOCAL synchronous_commit TO OFF;")
         execute_values(cur, sql, values, page_size=250)
 
+
 def finalize_auction(
     auction_id: int,
     final_price: Optional[float],
     final_price_confidence: Optional[str] = None,
-    status: str = 'ENDED_CONFIRMED',
+    status: str = 'ended_confirmed',
     sale_type: Optional[str] = None
 ):
     conn = connection
@@ -302,8 +305,10 @@ def update_source_last_scraped(source_id: int, when: Optional[datetime] = None) 
             cur.execute("UPDATE sources SET last_scraped_at = %s WHERE id = %s", (to_aware_utc(when), source_id))
 
 
-# seed/maintenance helpers left as-is but wrapped
 def add_sources():
+    """
+    Example insert seed for crypto/news sources. Safe to leave in.
+    """
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("""
@@ -330,7 +335,7 @@ def truncate_sources():
 
 
 # ---------------------------
-# ARTICLES (kept, tidied)
+# ARTICLES
 # ---------------------------
 def create_articles():
     with connection, connection.cursor() as cur:
@@ -472,7 +477,7 @@ def truncate_articles():
 
 
 # ---------------------------
-# PRICES (kept, tidied)
+# PRICES
 # ---------------------------
 def create_prices():
     with connection, connection.cursor() as cur:
@@ -554,8 +559,7 @@ def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
 # ---------------------------
 def create_auction_tables():
     """
-    Modernised DDL to match functions elsewhere. If tables exist, this is a no-op.
-    (Types use TIMESTAMPTZ; names match mark_listing_seen/upsert_auction_listing.)
+    DDL to match auction_listings / auction_price_history usage.
     """
     with connection, connection.cursor() as cur:
         cur.execute("SET LOCAL synchronous_commit TO OFF;")
@@ -583,7 +587,9 @@ def create_auction_tables():
                 max_bid NUMERIC,
                 notes TEXT,
                 model_key TEXT,
-                time_left_s INTEGER
+                time_left_s INTEGER,
+                finalized BOOLEAN,
+                watch BOOLEAN
             )
         """)
         cur.execute("""
@@ -638,8 +644,16 @@ def mark_listing_seen(
                    final_price    = COALESCE(%s, final_price),
                    last_seen      = (now() AT TIME ZONE 'utc')
              WHERE external_id = %s
-        """, (price_current, bids_count, to_aware_utc(end_time) if end_time else None,
-              time_left_s, model_key, status, final_price, external_id))
+        """, (
+            price_current,
+            bids_count,
+            to_aware_utc(end_time) if end_time else None,
+            time_left_s,
+            model_key,
+            status,
+            final_price,
+            external_id,
+        ))
 
 
 def insert_or_ignore_listing(
@@ -662,7 +676,16 @@ def insert_or_ignore_listing(
             INSERT INTO auction_listings (source, external_id, title, url, price_current, bids_count, end_time, model_key, status, first_seen, last_seen, fetched_at)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'live', (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'))
             ON CONFLICT (external_id) DO NOTHING
-        """, (source, external_id, title, url, price_current, bids_count, to_aware_utc(end_time) if end_time else None, model_key))
+        """, (
+            source,
+            external_id,
+            title,
+            url,
+            price_current,
+            bids_count,
+            to_aware_utc(end_time) if end_time else None,
+            model_key,
+        ))
 
 
 def upsert_auction_listing(
@@ -672,7 +695,7 @@ def upsert_auction_listing(
     title: str,
     price_current: int | float | None,
     bids_count: int | None,
-    end_time,                # datetime | None (naive or aware)
+    end_time,                # datetime | None
     url: str,
     detail_url: str | None = None,
     sale_type: str | None = None,
@@ -829,9 +852,8 @@ def mark_alert_emailed(alert_id: int):
         cur.execute("UPDATE alerts SET sent_at = (now() AT TIME ZONE 'utc') WHERE id = %s", (alert_id,))
 
 
-
 # ---------------------------
-# COMPS (aggregates)
+# COMPS (aggregates / pricing intelligence)
 # ---------------------------
 def create_comps():
     with connection, connection.cursor() as cur:
@@ -847,13 +869,19 @@ def create_comps():
             )
         """)
 
+
 def latest_comps_map() -> Dict[str, Dict[str, Any]]:
+    """
+    Return a dict of {model_key: {median_final_price, ...}} using DISTINCT ON.
+    Mostly for debugging / introspection.
+    """
     conn = connection
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         ensure_utc_session(cur)
         cur.execute("""
             WITH lc AS (
-              SELECT DISTINCT ON (model_key) model_key, median_final_price, mean_final_price, samples, computed_at
+              SELECT DISTINCT ON (model_key)
+                     model_key, median_final_price, mean_final_price, samples, computed_at
               FROM comps
               ORDER BY model_key, computed_at DESC
             )
@@ -864,6 +892,10 @@ def latest_comps_map() -> Dict[str, Dict[str, Any]]:
 
 
 def compute_daily_comps(days: int = 30):
+    """
+    Insert new per-model_key stats for the last N days of sold/confirmed listings.
+    Then prune and refresh the fast lookup view.
+    """
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("""
@@ -874,12 +906,13 @@ def compute_daily_comps(days: int = 30):
                    COUNT(*)::int AS samples,
                    (now() AT TIME ZONE 'utc') AS computed_at
             FROM auction_listings
-            WHERE status IN ('sold','ENDED_CONFIRMED')
+            WHERE status IN ('sold','ended_confirmed')
               AND final_price IS NOT NULL
               AND model_key IS NOT NULL
               AND end_time >= (now() AT TIME ZONE 'utc' - (%s || ' days')::interval)
             GROUP BY model_key
         """, (str(days),))
+
     # optional housekeeping
     try:
         prune_old_comps(keep_per_key=60)
@@ -890,7 +923,12 @@ def compute_daily_comps(days: int = 30):
     except Exception:
         pass
 
+
 def create_latest_comps_matview():
+    """
+    Materialized view so we can join against "latest market price per model_key"
+    instantly in alert logic.
+    """
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("""
@@ -902,18 +940,27 @@ def create_latest_comps_matview():
         # index to speed reads of the MV
         cur.execute("CREATE INDEX IF NOT EXISTS idx_latest_comps_model_key ON latest_comps(model_key)")
 
+
 def refresh_latest_comps_matview():
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("REFRESH MATERIALIZED VIEW latest_comps")
 
+
 def prune_old_comps(keep_per_key: int = 60):
+    """
+    Keep only the newest N rows per model_key in comps.
+    This stops comps table from growing forever.
+    """
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
-        cur.execute(f"""
+        cur.execute("""
             WITH ranked AS (
               SELECT model_key, computed_at,
-                     ROW_NUMBER() OVER (PARTITION BY model_key ORDER BY computed_at DESC) AS rn
+                     ROW_NUMBER() OVER (
+                         PARTITION BY model_key
+                         ORDER BY computed_at DESC
+                     ) AS rn
               FROM comps
             )
             DELETE FROM comps c
@@ -924,10 +971,88 @@ def prune_old_comps(keep_per_key: int = 60):
         """, (keep_per_key,))
 
 
+class CompRow(TypedDict):
+    model_key: str
+    median_final_price: Decimal
+    mean_final_price: Decimal
+    samples: int
+    computed_at: datetime
+
+
+def get_latest_comp_for_model(model_key: str) -> Optional[CompRow]:
+    """
+    Get the current 'market' snapshot for a given model_key.
+    This is what you'll use in alerts:
+    - if listing_price / comp["median_final_price"] < 0.7 -> scream.
+    """
+    with connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            SELECT model_key,
+                   median_final_price,
+                   mean_final_price,
+                   samples,
+                   computed_at
+            FROM latest_comps
+            WHERE model_key = %s
+            LIMIT 1
+        """, (model_key,))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "model_key": row[0],
+        "median_final_price": row[1],
+        "mean_final_price": row[2],
+        "samples": row[3],
+        "computed_at": row[4],
+    }
+
+
+def _get_last_comps_run_from_comps() -> Optional[datetime]:
+    """
+    Look at comps and ask: when did we last compute anything?
+    We use MAX(computed_at) as the "last run time".
+    No extra state table required.
+    """
+    with connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SELECT MAX(computed_at) FROM comps")
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def maybe_run_comps():
+    """
+    Call this once per heartbeat tick.
+    It only actually runs compute_daily_comps() if the last run
+    was >=24h ago (or there are no comps yet).
+    """
+    try:
+        last_run = _get_last_comps_run_from_comps()
+        now_utc = datetime.now(timezone.utc)
+
+        should_run = (
+            last_run is None or
+            (now_utc - last_run) >= timedelta(hours=24)
+        )
+
+        if not should_run:
+            return  # already fresh, skip
+
+        logger.info("[comps] computing daily comps snapshot")
+        compute_daily_comps(days=30)
+        logger.info("[comps] done")
+
+    except Exception as e:
+        logger.exception("[comps] failed to compute comps: %s", e)
+
+
 # ---------------------------
 # EBAY APP TOKEN CACHE
 # ---------------------------
-
 def create_ebay_app_token():
     """
     Single-row table to persist the eBay application OAuth token cross-process.
@@ -946,8 +1071,8 @@ def create_ebay_app_token():
 
 def load_cached_ebay_token() -> Optional[tuple[str, float]]:
     """
-    Returns (token, expiry_epoch_seconds) if we have a valid row,
-    otherwise None. Does NOT enforce freshness; caller decides.
+    Returns (token, expiry_epoch_seconds) if we have a row.
+    Does NOT enforce freshness; caller decides if expired.
     """
     with connection.cursor() as cur:
         ensure_utc_session(cur)
@@ -963,14 +1088,13 @@ def load_cached_ebay_token() -> Optional[tuple[str, float]]:
         return None
 
     token, expiry_ts = row  # expiry_ts is timestamptz -> Python datetime
-    # convert timestamptz -> epoch seconds (UTC)
     expiry_epoch = expiry_ts.replace(tzinfo=timezone.utc).timestamp()
     return token, expiry_epoch
 
 
 def save_cached_ebay_token(token: str, expiry_epoch: float) -> None:
     """
-    Upsert the token+expiry back into DB so the next process can reuse it.
+    Upsert token+expiry in DB for reuse next run.
     expiry_epoch is epoch seconds UTC.
     """
     expiry_dt = datetime.fromtimestamp(expiry_epoch, tz=timezone.utc)
@@ -987,23 +1111,25 @@ def save_cached_ebay_token(token: str, expiry_epoch: float) -> None:
         """, (token, expiry_dt))
 
 
-
 # ---------------------------
 # Indexes (performance)
 # ---------------------------
 def create_indexes():
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
-        # existing…
+
+        # auction_listings / lookup performance
         cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_status ON auction_listings(status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_end_time ON auction_listings(end_time)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_model_key ON auction_listings(model_key)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_auction_source ON auction_listings(source)")
+
+        # source scrape cadence
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sources_last_scraped ON sources(last_scraped_at)")
-        # new (for comps snapshots)
+
+        # comps snapshots
         cur.execute("CREATE INDEX IF NOT EXISTS idx_comps_model_key ON comps(model_key)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_comps_computed_at ON comps(computed_at)")
-
 
 
 # ---------------------------
@@ -1020,11 +1146,11 @@ def init_schema():
     create_comps()
     create_indexes()
     create_latest_comps_matview()
-    create_ebay_app_token()  # <-- add this
+    create_ebay_app_token()
 
-# Run on import; harmless due to IF NOT EXISTS everywhere.
+# Best-effort bootstrap on import.
 try:
     init_schema()
-except Exception as e:
-    # Avoid hard-crashing on import; caller can run init_schema() explicitly if desired.
+except Exception:
+    # Don't hard crash on import. Caller can manually run init_schema() later if needed.
     pass

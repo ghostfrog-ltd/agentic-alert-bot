@@ -27,7 +27,7 @@ def run(limit: int = 100):
         try:
             ended, final_price, sale_type = _fetch_detail_snapshot(r['detail_url'])
             if ended and final_price is not None:
-                finalize_auction(r['id'], final_price, 'HIGH', 'ENDED_CONFIRMED', sale_type)
-                logger.info(f"[reconcile] Auction {r['id']} upgraded to ENDED_CONFIRMED @ {final_price}")
+                finalize_auction(r['id'], final_price, 'HIGH', 'ended_confirmed', sale_type)
+                logger.info(f"[reconcile] Auction {r['id']} upgraded to ended_confirmed @ {final_price}")
         except Exception as e:
             logger.warning(f"[reconcile] Auction {r['id']} reconcile failed: {e}")

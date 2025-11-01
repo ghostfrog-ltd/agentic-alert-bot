@@ -14,9 +14,6 @@ from infrastructure.watchlist import (
     finalize_hot_batch,
 )
 
-# ❌ no longer needed, poll_hot_and_alert() imports this internally now
-# from infrastructure.ebay.api import fetch_live_snapshot
-
 logger = get_logger(__name__)
 
 # -------------------------------------------------
@@ -56,15 +53,16 @@ except Exception as e:
 
 try:
     from agent.actions.scan_flips import run as scan_flips
-except Exception:
+except Exception as e:
     scan_flips = None
     logger.error(f"[Heartbeat] import scan_flips failed: {e}")
 
-# compute_daily_comps may not exist on some branches
+# ✅ new: ask schema to decide if comps should run
 try:
-    from infrastructure.db.schema import compute_daily_comps
-except Exception:
-    compute_daily_comps = None
+    from infrastructure.db.schema import maybe_run_comps
+except Exception as e:
+    maybe_run_comps = None
+    logger.error(f"[Heartbeat] import maybe_run_comps failed: {e}")
 
 
 # -----------------------------
@@ -79,41 +77,24 @@ def env_flag(name: str, default: str = "0") -> bool:
 
 SLEEP_BASE_S = float(os.getenv("GF_HEARTBEAT_SLEEP_SECONDS", "5"))
 SLEEP_JITTER = float(os.getenv("GF_HEARTBEAT_JITTER_S", "0.7"))
-REFRESH_HRS = float(os.getenv("GF_COMPS_REFRESH_HOURS", "6"))
 
-FEAT_FLIPS = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
-FEAT_CLOSE = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
+FEAT_FLIPS  = env_flag("GF_HEARTBEAT_ENABLE_FLIPS")
+FEAT_CLOSE  = env_flag("GF_HEARTBEAT_ENABLE_CLOSE")
 FEAT_SCRAPE = env_flag("GF_HEARTBEAT_ENABLE_SCRAPE")
-FEAT_COMPS = env_flag("GF_HEARTBEAT_ENABLE_COMPS")
-FEAT_SCAN = env_flag("GF_HEARTBEAT_ENABLE_SCAN_ENDING")
+FEAT_COMPS  = env_flag("GF_HEARTBEAT_ENABLE_COMPS")
+FEAT_SCAN   = env_flag("GF_HEARTBEAT_ENABLE_SCAN_ENDING")
 FEAT_ALERTS = env_flag("GF_HEARTBEAT_ENABLE_ALERTS")
 
-HEARTBEAT_BUDGET_S = float(os.getenv("GF_HEARTBEAT_BUDGET_S", "120"))
-PHASE_HOT_BUDGET_S = float(os.getenv("GF_PHASE_HOT_BUDGET_S", "20"))
-PHASE_FINALIZE_BUDGET_S = float(os.getenv("GF_PHASE_FINALIZE_BUDGET_S", "20"))
-PHASE_CLOSE_BUDGET_S = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S", "40"))
+HEARTBEAT_BUDGET_S        = float(os.getenv("GF_HEARTBEAT_BUDGET_S", "120"))
+PHASE_HOT_BUDGET_S        = float(os.getenv("GF_PHASE_HOT_BUDGET_S", "20"))
+PHASE_FINALIZE_BUDGET_S   = float(os.getenv("GF_PHASE_FINALIZE_BUDGET_S", "20"))
+PHASE_CLOSE_BUDGET_S      = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S", "40"))
 
 _lock = threading.Lock()
-_last_comps_at: datetime | None = None
 
 
 def _sleep_with_jitter():
     time.sleep(SLEEP_BASE_S + random.uniform(0, SLEEP_JITTER))
-
-
-def _maybe_refresh_comps():
-    global _last_comps_at
-    if not (FEAT_COMPS and compute_daily_comps):
-        return
-    now = datetime.now(timezone.utc)
-    if _last_comps_at is None or (now - _last_comps_at) > timedelta(hours=REFRESH_HRS):
-        t0 = perf_counter()
-        try:
-            compute_daily_comps()
-            _last_comps_at = now
-            logger.info(f"[Heartbeat] comps refreshed in {perf_counter() - t0:.2f}s")
-        except Exception as e:
-            logger.error(f"[Heartbeat] comps refresh failed: {e}")
 
 
 def tick():
@@ -146,7 +127,6 @@ def tick():
         if spent_total < HEARTBEAT_BUDGET_S:
             t0 = perf_counter()
             try:
-                # 👇 updated call: no arg now
                 poll_hot_and_alert()
                 phase_dt = perf_counter() - t0
                 logger.info(f"[Heartbeat] poll_hot_and_alert OK in {phase_dt:.2f}s")
@@ -193,8 +173,12 @@ def tick():
         elif FEAT_SCRAPE and not auth_ok:
             logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
 
-        # Phase 5: COMPS REFRESH
-        _maybe_refresh_comps()
+        # Phase 5: COMPS REFRESH (now delegated to schema)
+        if FEAT_COMPS and maybe_run_comps:
+            try:
+                maybe_run_comps()
+            except Exception as e:
+                logger.error(f"[Heartbeat] maybe_run_comps FAILED: {e}")
 
         # Phase 6: SCAN ENDING SOON
         if FEAT_SCAN and run_scan and spent_total < HEARTBEAT_BUDGET_S:

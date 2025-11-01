@@ -559,14 +559,14 @@ def tick() -> None:
             cutoff = now + GRACE_WINDOW
             rows = get_open_auctions_ending_before(cutoff) or []
             logger.info(
-                "[close] ENDING_SOON candidates: %d (cutoff=%s)",
+                "[close] ending_soon candidates: %d (cutoff=%s)",
                 len(rows),
                 cutoff.isoformat(),
             )
             updated = _mark_ending_soon_bulk(cutoff)
-            logger.info("[close] ENDING_SOON bulk updated: %d", updated)
+            logger.info("[close] ending_soon bulk updated: %d", updated)
         except Exception as e:
-            logger.error("[close] ENDING_SOON pass failed: %s", e)
+            logger.error("[close] ending_soon pass failed: %s", e)
 
         # Stage 2: finalize actually-dead stuff only
         try:

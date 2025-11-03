@@ -195,7 +195,7 @@ def _comps_lookup() -> Dict[str, Dict[str, Any]]:
     from infrastructure.db import schema  # local import
 
     try:
-        return schema.latest_comps_map()
+        return latest_comps_map()
     except Exception as e:
         logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
         return {}

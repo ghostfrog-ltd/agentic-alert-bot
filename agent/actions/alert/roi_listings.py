@@ -9,6 +9,7 @@ estimate profit/ROI, and:
 - Log the best opportunities
 - Record them in alerts (deduped by external_id)
 - Optionally send an HTML email digest of newly-created opportunities
+- Persist roi_estimate back onto auction_listings
 """
 
 from dataclasses import dataclass
@@ -200,6 +201,7 @@ def _comps_lookup() -> Dict[str, Dict[str, Any]]:
         logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
         return {}
 
+
 def latest_comps_map() -> Dict[str, Dict[str, Any]]:
     """
     Return a dict of {model_key: {median_final_price, ...}} using DISTINCT ON.
@@ -254,6 +256,7 @@ def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
         )
         return False, None
 
+
 def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
     from infrastructure.db import schema  # local import
 
@@ -264,6 +267,7 @@ def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
             VALUES (%s, %s)
             ON CONFLICT (name) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
         """, (name, schema.to_aware_utc(when) if when else None))
+
 
 def _send_email_digest(new_ops: List[Opportunity]) -> None:
     if not new_ops:
@@ -398,6 +402,7 @@ def _shortlist(
     out.sort(key=lambda o: (o.profit, o.roi), reverse=True)
     return out
 
+
 def get_alert_last_sent(name: str) -> Optional[datetime]:
     from infrastructure.db import schema
 
@@ -406,6 +411,37 @@ def get_alert_last_sent(name: str) -> Optional[datetime]:
         cur.execute("SELECT last_sent_at FROM alert_state WHERE name=%s", (name,))
         row = cur.fetchone()
         return row[0] if row else None
+
+
+def _update_roi_estimates(opps: List[Opportunity]) -> None:
+    """
+    Persist roi_estimate + max_bid back onto auction_listings.
+    """
+    if not opps:
+        return
+
+    from infrastructure.db import schema
+    from core.scoring.snipe import suggest_max_bid  # ✅ use your existing logic
+
+    try:
+        conn = schema.get_connection()
+        with conn, conn.cursor() as cur:
+            schema.ensure_utc_session(cur)
+            rows = []
+            for op in opps:
+                # Use your helper to compute the ceiling bid
+                max_bid = float(suggest_max_bid(op.comps_median))
+                rows.append((float(op.roi), max_bid, op.external_id))
+            cur.executemany(
+                "UPDATE auction_listings "
+                "SET roi_estimate = %s, max_bid = %s "
+                "WHERE external_id = %s",
+                rows,
+            )
+        logger.info("[roi_listings] updated roi_estimate + max_bid for %d listings", len(opps))
+    except Exception as e:
+        logger.warning("[roi_listings] failed to update roi_estimate/max_bid: %s", e)
+
 
 # --------------------------------
 # Public entry point
@@ -416,9 +452,10 @@ def run(limit_output: int = 20) -> List[Opportunity]:
       1. Pull active listings
       2. Join to latest comps
       3. Filter for real flips (profit/ROI gates)
-      4. Log top N
-      5. Record each opportunity in alerts (deduped)
-      6. Optionally email only the *new* ones, with cooldown
+      4. Persist roi_estimate back to auction_listings
+      5. Log top N
+      6. Record each opportunity in alerts (deduped)
+      7. Optionally email only the *new* ones, with cooldown
     """
     from infrastructure.db import schema  # local import
 
@@ -440,6 +477,9 @@ def run(limit_output: int = 20) -> List[Opportunity]:
             MIN_ROI * 100,
         )
         return []
+
+    # 2b. persist roi_estimate back to auction_listings
+    _update_roi_estimates(opps)
 
     # 3. log top N for console visibility
     top = opps[:limit_output]

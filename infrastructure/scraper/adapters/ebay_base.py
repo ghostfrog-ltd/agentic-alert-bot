@@ -613,8 +613,7 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             source_id     = EXCLUDED.source_id,
             model_key     = COALESCE(EXCLUDED.model_key,     auction_listings.model_key),
             time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
-            status        = COALESCE(EXCLUDED.status,        auction_listings.status),
-            last_seen     = (now() AT TIME ZONE 'utc')
+            status        = COALESCE(EXCLUDED.status,        auction_listings.status)
     """
     conn = connection
     with conn, conn.cursor() as cur:

@@ -16,8 +16,8 @@ logger = get_logger(__name__)
 # -----------------
 EBAY_BROWSE_URL = "https://api.ebay.com/buy/browse/v1/item/"
 EBAY_TRADING_ENDPOINT = "https://api.ebay.com/ws/api.dll"
-EBAY_SITE_ID = "3"            # UK
-EBAY_COMPAT_LEVEL = "967"     # compat level suitable for GetItem
+EBAY_SITE_ID = "3"  # UK
+EBAY_COMPAT_LEVEL = "967"  # compat level suitable for GetItem
 
 
 class EbayApiRateLimited(Exception):
@@ -106,8 +106,8 @@ def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
         pass
 
     item_node = (
-        root.find(".//{urn:ebay:apis:eBLBaseComponents}Item")
-        or root.find(".//Item")
+            root.find(".//{urn:ebay:apis:eBLBaseComponents}Item")
+            or root.find(".//Item")
     )
     if item_node is None:
         logger.warning("[eBayAPI] Trading returned no <Item> node for %s", item_id)
@@ -121,20 +121,20 @@ def _interpret_trading_item(item_node: ET.Element) -> dict:
     ns = {"ns": "urn:ebay:apis:eBLBaseComponents"}
 
     item_id = (
-        item_node.findtext("./ns:ItemID", default="", namespaces=ns)
-        or "?"
+            item_node.findtext("./ns:ItemID", default="", namespaces=ns)
+            or "?"
     )
 
     listing_status_raw = (
-        item_node.findtext("./ns:ListingStatus", default="", namespaces=ns)
-        or item_node.findtext("./ns:SellingStatus/ns:ListingStatus", default="", namespaces=ns)
-        or ""
+            item_node.findtext("./ns:ListingStatus", default="", namespaces=ns)
+            or item_node.findtext("./ns:SellingStatus/ns:ListingStatus", default="", namespaces=ns)
+            or ""
     )
     listing_status = listing_status_raw.lower()
 
     selling_state_raw = (
-        item_node.findtext("./ns:SellingStatus/ns:SellingState", default="", namespaces=ns)
-        or ""
+            item_node.findtext("./ns:SellingStatus/ns:SellingState", default="", namespaces=ns)
+            or ""
     )
     selling_state = selling_state_raw.lower()
 
@@ -166,10 +166,10 @@ def _interpret_trading_item(item_node: ET.Element) -> dict:
     elif qty_sold > 0:
         sold_flag = True
     elif (
-        ("completed" in listing_status or "completed" in selling_state)
-        and bid_count > 0
-        and final_price
-        and final_price > 0
+            ("completed" in listing_status or "completed" in selling_state)
+            and bid_count > 0
+            and final_price
+            and final_price > 0
     ):
         sold_flag = True
 
@@ -288,15 +288,13 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
         "qty_sold": None,
         "listing_status": None,
         "selling_state": None,
-        "market_price": row.get("market_price"),
     }
 
     logger.debug(
-        "[eBayAPI] Browse snapshot listing=%s live_price=£%s bids=%s market=£%s",
+        "[eBayAPI] Browse snapshot listing=%s live_price=£%s bids=%s",
         row.get("id"),
         price,
         bid_count,
-        row.get("market_price"),
     )
 
     return snapshot
@@ -308,9 +306,9 @@ def fetch_live_snapshot(row: dict) -> dict:
     Browse first, fallback to Trading.
     """
     item_id = (
-        row.get("item_id")
-        or row.get("external_id")
-        or row.get("ebay_id")
+            row.get("item_id")
+            or row.get("external_id")
+            or row.get("ebay_id")
     )
     if not item_id:
         logger.warning("[eBayAPI] no item_id for listing id=%s", row.get("id"))
@@ -324,7 +322,6 @@ def fetch_live_snapshot(row: dict) -> dict:
             "qty_sold": None,
             "listing_status": None,
             "selling_state": None,
-            "market_price": row.get("market_price"),
         }
 
     # Try Browse for live stuff
@@ -350,7 +347,6 @@ def fetch_live_snapshot(row: dict) -> dict:
             "qty_sold": None,
             "listing_status": None,
             "selling_state": None,
-            "market_price": row.get("market_price"),
         }
 
     if item_node is None:
@@ -365,7 +361,6 @@ def fetch_live_snapshot(row: dict) -> dict:
             "qty_sold": None,
             "listing_status": None,
             "selling_state": None,
-            "market_price": row.get("market_price"),
         }
 
     trading_snap = _interpret_trading_item(item_node)
@@ -380,7 +375,6 @@ def fetch_live_snapshot(row: dict) -> dict:
         "qty_sold": trading_snap["qty_sold"],
         "listing_status": trading_snap["listing_status"],
         "selling_state": trading_snap["selling_state"],
-        "market_price": row.get("market_price"),
     }
 
 

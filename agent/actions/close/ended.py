@@ -267,28 +267,29 @@ def _load_candidates(limit: int, grace_minutes: int) -> Sequence[tuple]:
     return rows
 
 
-def _apply_updates(updates: List[Tuple[int, Optional[float]]]) -> None:
+def _apply_updates(updates: List[Tuple[int, Optional[float], int]]) -> None:
     """
     Apply finalization updates in a single DB transaction.
 
-    updates: list of (auction_id, final_price or None)
+    updates: list of (auction_id, final_price or None, bid_count)
     """
     if not updates:
         return
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            for auction_id, final_price in updates:
+            for auction_id, final_price, bid_count in updates:
                 if final_price is None:
                     # Ended but unsold
                     cur.execute(
                         """
                         UPDATE auction_listings
                         SET finalized = TRUE,
-                            status = 'ended'
+                            status = 'ended',
+                            bids_count = %s
                         WHERE id = %s
                         """,
-                        (auction_id,),
+                        (bid_count, auction_id),
                     )
                 else:
                     # Ended and sold
@@ -297,10 +298,11 @@ def _apply_updates(updates: List[Tuple[int, Optional[float]]]) -> None:
                         UPDATE auction_listings
                         SET finalized = TRUE,
                             final_price = %s,
-                            status = 'sold'
+                            status = 'sold',
+                            bids_count = %s
                         WHERE id = %s
                         """,
-                        (final_price, auction_id),
+                        (final_price, bid_count, auction_id),
                     )
         conn.commit()
 
@@ -327,7 +329,8 @@ def run(limit: int = 10, grace_minutes: int = 30) -> None:
 
     logger.info("[close.ended] found %d candidate auctions", len(rows))
 
-    updates: List[Tuple[int, Optional[float]]] = []
+    # now includes bid_count in the tuple
+    updates: List[Tuple[int, Optional[float], int]] = []
 
     for row in rows:
         auction_id, external_id, source, end_time = row
@@ -352,7 +355,7 @@ def run(limit: int = 10, grace_minutes: int = 30) -> None:
 
         # Track usage OUTSIDE any DB connection used by this action
         try:
-            increment_api_usage("ebay_trading")
+            increment_api_usage("ebay")
         except Exception as e:
             logger.warning(
                 "[close.ended] increment_api_usage failed for external_id=%s: %s",
@@ -418,7 +421,8 @@ def run(limit: int = 10, grace_minutes: int = 30) -> None:
             else None
         )
 
-        updates.append((auction_id, final_price))
+        # include bid_count in the update tuple
+        updates.append((auction_id, final_price, snapshot.bid_count))
 
         logger.info(
             "[close.ended] prepared finalize auction_id=%s external_id=%s final_price=%s "

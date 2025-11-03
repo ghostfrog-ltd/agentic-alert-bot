@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+"""
+agent/actions/alert/roi_listings.py
+
+Scan all active listings in auction_listings, join them to latest comps,
+estimate profit/ROI, and:
+
+- Log the best opportunities
+- Record them in alerts (deduped by external_id)
+- Optionally send an HTML email digest of newly-created opportunities
+"""
+
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 from decimal import Decimal, ROUND_HALF_UP
@@ -36,7 +47,7 @@ PER_SOURCE: Dict[str, Dict[str, float]] = {
 RECORD_ALERTS: bool = True
 SEND_EMAIL_DIGEST: bool = True
 
-ALERT_NAME: str = "flipbot_digest"          # used in alert_state to track last-sent
+ALERT_NAME: str = "roi_listings_digest"     # used in alert_state to track last-sent
 TO_EMAIL: str = "info@ghostfrog.co.uk"
 MAX_EMAIL_ITEMS: int = 20                   # cap items in a single email
 EMAIL_COOLDOWN = timedelta(minutes=30)      # don't email more often than this
@@ -79,7 +90,7 @@ class Opportunity:
 
     def as_log(self) -> str:
         return (
-            f"[FLIP] {self.title[:80]} "
+            f"[ROI] {self.title[:80]} "
             f"| buy £{self.purchase_cost:.2f} → sell £{self.comps_median:.2f} "
             f"| fees £{self.fees:.2f} | ship £{self.outbound_ship:.2f} "
             f"| PROFIT £{self.profit:.2f} ({self.roi*100:.1f}% ROI) "
@@ -186,8 +197,30 @@ def _comps_lookup() -> Dict[str, Dict[str, Any]]:
     try:
         return schema.latest_comps_map()
     except Exception as e:
-        logger.warning("[scan_flips] latest_comps_map() failed: %s", e)
+        logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
         return {}
+
+def latest_comps_map() -> Dict[str, Dict[str, Any]]:
+    """
+    Return a dict of {model_key: {median_final_price, ...}} using DISTINCT ON.
+    Mostly for debugging / introspection.
+    """
+    from infrastructure.db import schema  # local import
+
+    conn = schema.get_connection()
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        schema.ensure_utc_session(cur)
+        cur.execute("""
+            WITH lc AS (
+              SELECT DISTINCT ON (model_key)
+                     model_key, median_final_price, mean_final_price, samples, computed_at
+              FROM comps
+              ORDER BY model_key, computed_at DESC
+            )
+            SELECT * FROM lc
+        """)
+        rows = cur.fetchall()
+        return {r["model_key"]: r for r in rows}
 
 
 def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
@@ -215,21 +248,33 @@ def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
 
     except Exception as e:
         logger.warning(
-            "[scan_flips] record_alert failed for external_id=%s: %s",
+            "[roi_listings] record_alert failed for external_id=%s: %s",
             op.external_id,
             e,
         )
         return False, None
 
+def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
+    from infrastructure.db import schema  # local import
+
+    with schema.get_connection(), schema.get_connection().cursor() as cur:
+        schema.ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO alert_state (name, last_sent_at)
+            VALUES (%s, %s)
+            ON CONFLICT (name) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
+        """, (name, schema.to_aware_utc(when) if when else None))
 
 def _send_email_digest(new_ops: List[Opportunity]) -> None:
     if not new_ops:
         return
 
     from infrastructure.utils.emailer import send_email  # local import
-    from infrastructure.db import schema  # local import
 
-    subject = f"🐸 FlipBot: {len(new_ops)} new eBay deals (≥ £{MIN_PROFIT_GBP:.0f})"
+    subject = (
+        f"🐸 ROI Listings: {len(new_ops)} new high-ROI deals "
+        f"(≥ £{MIN_PROFIT_GBP:.0f})"
+    )
 
     rows_html: List[str] = []
     for op in new_ops[:MAX_EMAIL_ITEMS]:
@@ -259,7 +304,7 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         '<div style="font-family:system-ui,Arial,sans-serif;'
         'color:#111;font-size:14px;line-height:1.45;">'
         '<h2 style="margin:0 0 16px;font-size:16px;line-height:1.3;">'
-        'FlipBot opportunities 🐸</h2>'
+        'High-ROI listings 🐸</h2>'
         + "".join(rows_html) +
         "</div>"
     )
@@ -268,18 +313,17 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         send_email(
             subject=subject,
             body=body_html,
-            to_addr=TO_EMAIL,   # <-- this MUST be to_addr
-            is_html=True,       # <-- and this is allowed now
+            to_addr=TO_EMAIL,   # MUST be to_addr
+            is_html=True,       # HTML email is allowed
         )
-        schema.set_alert_last_sent(ALERT_NAME)
+        set_alert_last_sent(ALERT_NAME)
         logger.info(
-            "[scan_flips] email sent to %s with %d items",
+            "[roi_listings] email sent to %s with %d items",
             TO_EMAIL,
             len(new_ops),
         )
     except Exception as e:
-        logger.error("[scan_flips] email send failed: %s", e)
-
+        logger.error("[roi_listings] email send failed: %s", e)
 
 
 # --------------------------------
@@ -354,6 +398,14 @@ def _shortlist(
     out.sort(key=lambda o: (o.profit, o.roi), reverse=True)
     return out
 
+def get_alert_last_sent(name: str) -> Optional[datetime]:
+    from infrastructure.db import schema
+
+    with schema.get_connection().cursor() as cur:
+        schema.ensure_utc_session(cur)
+        cur.execute("SELECT last_sent_at FROM alert_state WHERE name=%s", (name,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 # --------------------------------
 # Public entry point
@@ -374,7 +426,7 @@ def run(limit_output: int = 20) -> List[Opportunity]:
     try:
         listings = _fetch_active_listings()
     except Exception as e:
-        logger.error("[scan_flips] fetch active listings failed: %s", e)
+        logger.error("[roi_listings] fetch active listings failed: %s", e)
         return []
 
     comps_by_model = _comps_lookup()
@@ -383,7 +435,7 @@ def run(limit_output: int = 20) -> List[Opportunity]:
     opps = _shortlist(listings, comps_by_model)
     if not opps:
         logger.info(
-            "[scan_flips] no opportunities ≥ £%.2f / ROI ≥ %.0f%%",
+            "[roi_listings] no opportunities ≥ £%.2f / ROI ≥ %.0f%%",
             MIN_PROFIT_GBP,
             MIN_ROI * 100,
         )
@@ -392,7 +444,7 @@ def run(limit_output: int = 20) -> List[Opportunity]:
     # 3. log top N for console visibility
     top = opps[:limit_output]
     logger.info(
-        "[scan_flips] %d opportunities found (showing %d)",
+        "[roi_listings] %d opportunities found (showing %d)",
         len(opps),
         len(top),
     )
@@ -409,7 +461,7 @@ def run(limit_output: int = 20) -> List[Opportunity]:
 
     # 5. email digest of JUST the new ones, respecting cooldown
     if SEND_EMAIL_DIGEST and newly_created:
-        last_sent = schema.get_alert_last_sent(ALERT_NAME)
+        last_sent = get_alert_last_sent(ALERT_NAME)
 
         # If never sent, send now.
         if last_sent is None:
@@ -425,7 +477,7 @@ def run(limit_output: int = 20) -> List[Opportunity]:
                     _send_email_digest(newly_created)
                 else:
                     logger.info(
-                        "[scan_flips] skipping email (cooldown %.0f min not reached)",
+                        "[roi_listings] skipping email (cooldown %.0f min not reached)",
                         EMAIL_COOLDOWN.total_seconds() / 60.0,
                     )
 

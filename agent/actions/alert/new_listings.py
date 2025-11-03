@@ -38,14 +38,65 @@ def _set_last_sent_at(cur, ts: datetime):
     )
 
 
+def _extract_numeric_item_id(raw_id: str | None) -> str | None:
+    """
+    eBay Browse API itemIds often look like 'v1|123456789012|0'.
+    We only want the numeric middle bit for a public /itm/ URL.
+
+    If it's already just digits, keep it. If it's None or weird, return None.
+    """
+    if not raw_id:
+        return None
+
+    # common case: v1|123456789012|0
+    if "|" in raw_id:
+        parts = raw_id.split("|")
+        # usually parts[1] is the numeric ID
+        for p in parts:
+            if p.isdigit():
+                return p
+
+    # fallback: if the whole thing is digits already
+    if raw_id.isdigit():
+        return raw_id
+
+    # couldn't get anything clean
+    return None
+
+
+def _build_uk_url(raw_external_id: str | None) -> str:
+    """
+    Force eBay UK domain so we land on GBP / UK context instead of USD.
+    We ignore whatever 'url' the API gave us (which is usually .com).
+    """
+    numeric_id = _extract_numeric_item_id(raw_external_id)
+    if not numeric_id:
+        # fallback: just return something so the email doesn't explode
+        return "https://www.ebay.co.uk/"
+
+    return f"https://www.ebay.co.uk/itm/{numeric_id}"
+
+
 def _fetch_new_listings(cur, cutoff: datetime):
+    """
+    Grab recent listings since cutoff.
+    We now also select external_id so we can build a .co.uk URL ourselves.
+    """
     cutoff = to_aware_utc(cutoff)
+
     if SOURCES_FILTER:
         cur.execute(
             f"""
-            SELECT source, title, price_current, url, first_seen
+            SELECT
+                source,
+                title,
+                price_current,
+                url,
+                external_id,
+                first_seen
             FROM auction_listings
-            WHERE first_seen > %s AND source = ANY(%s)
+            WHERE first_seen > %s
+              AND source = ANY(%s)
             ORDER BY first_seen ASC
             LIMIT {MAX_ITEMS}
             """,
@@ -54,7 +105,13 @@ def _fetch_new_listings(cur, cutoff: datetime):
     else:
         cur.execute(
             f"""
-            SELECT source, title, price_current, url, first_seen
+            SELECT
+                source,
+                title,
+                price_current,
+                url,
+                external_id,
+                first_seen
             FROM auction_listings
             WHERE first_seen > %s
             ORDER BY first_seen ASC
@@ -62,6 +119,7 @@ def _fetch_new_listings(cur, cutoff: datetime):
             """,
             (cutoff,),
         )
+
     return cur.fetchall()
 
 
@@ -78,6 +136,7 @@ def run():
     conn = connection
     cur = conn.cursor()
 
+    # try to force UTC for comparisons / ISO timestamps
     try:
         cur.execute("SET TIME ZONE 'UTC'")
     except Exception:
@@ -86,11 +145,14 @@ def run():
     last_sent = _get_last_sent_at(cur)
     now_aware = now_utc()
 
+    # first run looks back a big window (24h default)
     default_cut = (
         now_aware - timedelta(hours=FIRST_RUN_LOOKBACK_HOURS)
         if last_sent is None
         else (now_aware - timedelta(minutes=WINDOW_MINUTES))
     )
+
+    # cutoff = later of (default_cut, last_sent), unless no last_sent at all
     cutoff = max(default_cut, last_sent) if last_sent else default_cut
 
     rows = _fetch_new_listings(cur, cutoff)
@@ -100,22 +162,31 @@ def run():
     by_source_count: dict[str, int] = {}
     newest_seen = cutoff
 
-    lines_html = []
-    for source, title, price, url, first_seen in rows:
+    lines_html: list[str] = []
+
+    # rows are now:
+    #   (source, title, price_current, url, external_id, first_seen)
+    for source, title, price, _raw_url, external_id, first_seen in rows:
         first_seen = to_aware_utc(first_seen)
 
+        # update source counts for the subject line
         by_source_count[source] = by_source_count.get(source, 0) + 1
+
+        # watermark so we don't resend the same stuff next run
         if first_seen and first_seen > newest_seen:
             newest_seen = first_seen
 
         safe_title = (title or "").strip().replace("\n", " ")
-        safe_url = (url or "").strip()
+
+        # ignore the stored URL (which might be .com / USD)
+        # always generate a UK URL from the eBay item ID
+        uk_url = _build_uk_url(external_id)
 
         lines_html.append(
             (
                 '<li style="margin-bottom:8px;">'
                 f'<strong>[{source}]</strong> '
-                f'<a href="{safe_url}" target="_blank" '
+                f'<a href="{uk_url}" target="_blank" '
                 'style="color:#0b65c2;text-decoration:none;font-weight:600;">'
                 f'{safe_title}</a> — {_format_money(price)}'
                 '</li>'

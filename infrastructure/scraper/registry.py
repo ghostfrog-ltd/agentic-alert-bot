@@ -5,15 +5,43 @@ from datetime import datetime, timedelta
 
 from infrastructure.utils.logger import get_logger
 from core.contracts import SiteAdapter
-from infrastructure.db.schema import resolve_source_field
+from infrastructure.db.schema import resolve_source_field, get_connection, ensure_utc_session, to_aware_utc
+from dataclasses import asdict
+
+connection = get_connection()
 
 logger = get_logger(__name__)
 
 # knobs you can tune
-MAX_PER_ADAPTER = 20                   # stop after N articles per adapter per crawl
-JITTER_BETWEEN_ARTICLES = (0.3, 0.8)   # polite tiny sleep between parses
-BACKOFF_ON_429_SECONDS = 8             # small extra pause before the next URL
-RETRY_INTERVAL = timedelta(days=1)     # retry content scraping once per day
+MAX_PER_ADAPTER = 20  # stop after N articles per adapter per crawl
+JITTER_BETWEEN_ARTICLES = (0.3, 0.8)  # polite tiny sleep between parses
+BACKOFF_ON_429_SECONDS = 8  # small extra pause before the next URL
+RETRY_INTERVAL = timedelta(days=1)  # retry content scraping once per day
+
+UPSERT_ARTICLE_SQL = """
+INSERT INTO articles (
+    source_id, title, url, summary, published_at,
+    fetched_at,
+    content, sentiment,
+    created_at_utc, updated_at_utc
+)
+VALUES (
+    %(source_id)s, %(title)s, %(url)s, %(summary)s, %(published_at)s,
+    (now() AT TIME ZONE 'utc'),
+    %(content)s, %(sentiment)s,
+    (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc')
+)
+ON CONFLICT (url) DO UPDATE SET
+    source_id      = EXCLUDED.source_id,
+    title          = COALESCE(EXCLUDED.title,        articles.title),
+    summary        = COALESCE(EXCLUDED.summary,      articles.summary),
+    published_at   = COALESCE(EXCLUDED.published_at, articles.published_at),
+    fetched_at     = (now() AT TIME ZONE 'utc'),
+    content        = COALESCE(EXCLUDED.content,      articles.content),
+    sentiment      = COALESCE(EXCLUDED.sentiment,    articles.sentiment),
+    updated_at_utc = (now() AT TIME ZONE 'utc')
+RETURNING id;
+"""
 
 
 class AdapterRegistry:
@@ -36,9 +64,9 @@ class AdapterRegistry:
         Prefer adapter.source or adapter.SOURCE, fallback to class name.
         """
         return (
-            getattr(adapter, "source", None)
-            or getattr(adapter, "SOURCE", None)
-            or adapter.__class__.__name__.lower()
+                getattr(adapter, "source", None)
+                or getattr(adapter, "SOURCE", None)
+                or adapter.__class__.__name__.lower()
         )
 
     def _is_source_enabled(self, source_name: str, cache: dict[str, bool]) -> bool:
@@ -138,3 +166,36 @@ class AdapterRegistry:
 
                 except Exception as e:
                     logger.warning(f"{adapter.__class__.__name__} failed {url}: {e}")
+
+
+def touch_updated_at(url: str, ts=None):
+    with connection, connection.cursor() as cur:
+        if ts is None:
+            cur.execute("UPDATE articles SET updated_at_utc = (now() AT TIME ZONE 'utc') WHERE url = %s", (url,))
+        else:
+            cur.execute("UPDATE articles SET updated_at_utc = %s WHERE url = %s", (to_aware_utc(ts), url))
+
+
+def upsert_article(article):
+    with connection, connection.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute(UPSERT_ARTICLE_SQL, asdict(article))
+        (article_id,) = cur.fetchone()
+        return article_id
+
+
+def find_by_url(url: str):
+    with connection.cursor() as cur:
+        cur.execute("""
+            SELECT id, source_id, title, url, summary, published_at,
+                   fetched_at, content, sentiment, created_at_utc, updated_at_utc
+            FROM articles
+            WHERE url = %s
+            LIMIT 1
+        """, (url,))
+        row = cur.fetchone()
+    if not row:
+        return None
+    keys = ["id", "source_id", "title", "url", "summary", "published_at",
+            "fetched_at", "content", "sentiment", "created_at_utc", "updated_at_utc"]
+    return dict(zip(keys, row))

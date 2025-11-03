@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import requests
 import xml.etree.ElementTree as ET
 from typing import Any, Optional
@@ -31,10 +32,6 @@ class EbayApiTempError(Exception):
 # Helpers
 # -----------------
 def _xml_text(node: Optional[ET.Element], path: str) -> Optional[str]:
-    """
-    Safe text fetch from an XML element.
-    Tries namespaced and non-namespaced lookup.
-    """
     if node is None:
         return None
 
@@ -43,7 +40,6 @@ def _xml_text(node: Optional[ET.Element], path: str) -> Optional[str]:
     if found is not None and found.text:
         return found.text.strip()
 
-    # fallback dumb walk without namespace
     cur = node
     for part in path.strip("./").split("/"):
         if cur is None:
@@ -55,15 +51,15 @@ def _xml_text(node: Optional[ET.Element], path: str) -> Optional[str]:
     return None
 
 
-def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
-    """
-    Call eBay Trading API GetItem (XML) to get final sale info for ended listings.
+def _get_trading_token() -> str:
+    trading_token = os.getenv("EBAY_TRADING_TOKEN", "").strip()
+    if not trading_token:
+        raise RuntimeError("EBAY_TRADING_TOKEN is not set in env")
+    return trading_token
 
-    Returns <Item> node or None.
-    Raises EbayApiRateLimited / EbayApiTempError on network/rate issues.
-    """
-    auth = get_auth()
-    token = auth.get_token() if hasattr(auth, "get_token") else auth
+
+def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
+    token = _get_trading_token()
 
     headers = {
         "Content-Type": "text/xml",
@@ -75,6 +71,9 @@ def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
 
     body = f"""<?xml version="1.0" encoding="utf-8"?>
 <GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">
+  <RequesterCredentials>
+    <eBayAuthToken>{token}</eBayAuthToken>
+  </RequesterCredentials>
   <ItemID>{item_id}</ItemID>
   <DetailLevel>ReturnAll</DetailLevel>
   <IncludeWatchCount>true</IncludeWatchCount>
@@ -85,119 +84,134 @@ def _call_trading_getitem(item_id: str) -> Optional[ET.Element]:
         EBAY_TRADING_ENDPOINT,
         data=body.encode("utf-8"),
         headers=headers,
-        timeout=(4, 6),
+        timeout=(6, 8),
     )
 
     if resp.status_code == 429:
         raise EbayApiRateLimited("429 from Trading API GetItem")
-
     if resp.status_code >= 500:
         raise EbayApiTempError(f"Trading API {resp.status_code} (5xx)")
-
-    if resp.status_code != 200:
-        logger.warning(
-            "[eBayAPI] Trading GetItem HTTP %s for %s body=%s",
-            resp.status_code, item_id, resp.text[:400]
-        )
-        raise EbayApiTempError(f"Trading GetItem HTTP {resp.status_code}")
 
     try:
         root = ET.fromstring(resp.text)
     except ET.ParseError as e:
         raise EbayApiTempError(f"Trading XML parse fail: {e}")
 
+    # debug dump
+    try:
+        os.makedirs("/tmp/ebay_debug", exist_ok=True)
+        with open(f"/tmp/ebay_debug/{item_id}.xml", "w") as f:
+            f.write(resp.text)
+    except Exception:
+        pass
+
     item_node = (
         root.find(".//{urn:ebay:apis:eBLBaseComponents}Item")
         or root.find(".//Item")
     )
     if item_node is None:
+        logger.warning("[eBayAPI] Trading returned no <Item> node for %s", item_id)
         return None
 
-    # ✅ success means we actually hit eBay Trading API and parsed it
     increment_api_usage("ebay")
-
     return item_node
 
 
 def _interpret_trading_item(item_node: ET.Element) -> dict:
-    """
-    Convert Trading API <Item> node into the unified snapshot dict.
-    """
-    listing_status = (
-        _xml_text(item_node, "./ListingStatus")
-        or _xml_text(item_node, "./SellingStatus/ListingStatus")
+    ns = {"ns": "urn:ebay:apis:eBLBaseComponents"}
+
+    item_id = (
+        item_node.findtext("./ns:ItemID", default="", namespaces=ns)
+        or "?"
+    )
+
+    listing_status_raw = (
+        item_node.findtext("./ns:ListingStatus", default="", namespaces=ns)
+        or item_node.findtext("./ns:SellingStatus/ns:ListingStatus", default="", namespaces=ns)
         or ""
-    ).lower()
+    )
+    listing_status = listing_status_raw.lower()
 
-    selling_state = (
-        _xml_text(item_node, "./SellingStatus/SellingState")
+    selling_state_raw = (
+        item_node.findtext("./ns:SellingStatus/ns:SellingState", default="", namespaces=ns)
         or ""
-    ).lower()
+    )
+    selling_state = selling_state_raw.lower()
 
-    bid_count_txt = _xml_text(item_node, "./SellingStatus/BidCount")
-    current_price_txt = _xml_text(item_node, "./SellingStatus/CurrentPrice")
+    qty_sold_txt = item_node.findtext("./ns:SellingStatus/ns:QuantitySold", default="", namespaces=ns)
+    bid_count_txt = item_node.findtext("./ns:SellingStatus/ns:BidCount", default="", namespaces=ns)
+    current_price_txt = item_node.findtext("./ns:SellingStatus/ns:CurrentPrice", default="", namespaces=ns)
 
-    # live vs ended
-    if "active" in listing_status or "active" in selling_state:
-        live = True
-        ended = False
-    else:
-        live = False
-        ended = True
+    try:
+        qty_sold = int(qty_sold_txt) if qty_sold_txt else 0
+    except ValueError:
+        qty_sold = 0
 
-    # sold?
-    sold = False
+    try:
+        bid_count = int(bid_count_txt) if bid_count_txt else 0
+    except ValueError:
+        bid_count = 0
+
+    try:
+        final_price = float(current_price_txt) if current_price_txt else None
+    except ValueError:
+        final_price = None
+
+    live = ("active" in listing_status) or ("active" in selling_state)
+    ended = not live
+
+    sold_flag = False
     if "endedwithsales" in selling_state:
-        sold = True
-    elif "completed" in listing_status or "completed" in selling_state:
-        try:
-            bc = int(bid_count_txt) if bid_count_txt else 0
-        except ValueError:
-            bc = 0
-        if bc > 0:
-            sold = True
-    elif "ended" in selling_state and "withsales" in selling_state:
-        sold = True
-
-    # final price
-    final_price = None
-    if current_price_txt:
-        try:
-            final_price = float(current_price_txt)
-        except ValueError:
-            final_price = None
-
-    # if still live, we don't trust that as final
-    if live:
-        final_price_to_report = None
-    else:
-        final_price_to_report = final_price
+        sold_flag = True
+    elif qty_sold > 0:
+        sold_flag = True
+    elif (
+        ("completed" in listing_status or "completed" in selling_state)
+        and bid_count > 0
+        and final_price
+        and final_price > 0
+    ):
+        sold_flag = True
 
     snapshot = {
+        "item_id": item_id,
         "ended": ended,
-        "sold": sold,
-        "final_price": final_price_to_report,
         "live": live,
+        "sold": sold_flag,
+        "final_price": (final_price if ended else None),
+        "bid_count": bid_count,
+        "qty_sold": qty_sold,
+        "listing_status": listing_status,
+        "selling_state": selling_state,
     }
 
-    # ↓ quieter: debug only
-    logger.debug(
-        "[eBayAPI] Trading snapshot item live=%s ended=%s sold=%s final=%s",
-        live,
+    logger.info(
+        "=== INTERPRETED FIELDS ====================\n"
+        "item_id: %s\n"
+        "ended: %s\n"
+        "live: %s\n"
+        "listing_status: %s\n"
+        "selling_state: %s\n"
+        "qty_sold: %s\n"
+        "bid_count: %s\n"
+        "final_price: %s\n"
+        "sold_flag: %s\n"
+        "===========================================",
+        item_id,
         ended,
-        sold,
-        final_price_to_report,
+        live,
+        listing_status,
+        selling_state,
+        qty_sold,
+        bid_count,
+        final_price,
+        sold_flag,
     )
 
     return snapshot
 
 
 def _call_browse(item_id: str) -> Optional[dict]:
-    """
-    Hit the Browse API (JSON). Good for live listings, often 404 for ended ones.
-    Returns parsed dict or None if not available.
-    Raises EbayApiRateLimited / EbayApiTempError if we got rate/5xx.
-    """
     auth = get_auth()
     token = auth.get_token() if hasattr(auth, "get_token") else auth
 
@@ -228,7 +242,6 @@ def _call_browse(item_id: str) -> Optional[dict]:
         )
         return None
 
-    # success, count usage
     increment_api_usage("ebay")
 
     try:
@@ -240,14 +253,9 @@ def _call_browse(item_id: str) -> Optional[dict]:
 
 
 def _interpret_browse_json(data: dict, row: dict) -> dict:
-    """
-    Convert Browse API JSON into partial snapshot.
-    This is mainly for *live* listings. Browse often doesn't tell us final sale price.
-    """
     price = None
     bid_count = None
 
-    # Try auction bid price first
     if "currentBidPrice" in data and isinstance(data["currentBidPrice"], dict):
         val = data["currentBidPrice"].get("value")
         if val is not None:
@@ -256,7 +264,6 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
             except Exception:
                 pass
 
-    # Fallback: BIN/current listing price
     if price is None and "price" in data and isinstance(data["price"], dict):
         val = data["price"].get("value")
         if val is not None:
@@ -265,7 +272,6 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
             except Exception:
                 pass
 
-    # bidCount if they give it
     if "bidCount" in data:
         try:
             bid_count = int(data["bidCount"])
@@ -275,14 +281,16 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
     snapshot = {
         "ended": False,
         "sold": False,
-        "final_price": None,      # Browse can't be trusted for true final
+        "final_price": None,
         "live": True,
         "current_price": price,
         "bid_count": bid_count,
+        "qty_sold": None,
+        "listing_status": None,
+        "selling_state": None,
         "market_price": row.get("market_price"),
     }
 
-    # ↓ quieter: debug only
     logger.debug(
         "[eBayAPI] Browse snapshot listing=%s live_price=£%s bids=%s market=£%s",
         row.get("id"),
@@ -296,13 +304,14 @@ def _interpret_browse_json(data: dict, row: dict) -> dict:
 
 def fetch_live_snapshot(row: dict) -> dict:
     """
-    Unified snapshot getter.
-
-    1. Try Browse API (JSON). Great for live listings.
-    2. If Browse returns nothing (404/hidden/etc), fall back to Trading API GetItem, which
-       tells us ended/sold/final_price even after it's not public.
+    Normal path for stuff that's still basically fresh / maybe still live.
+    Browse first, fallback to Trading.
     """
-    item_id = row.get("item_id") or row.get("external_id") or row.get("ebay_id")
+    item_id = (
+        row.get("item_id")
+        or row.get("external_id")
+        or row.get("ebay_id")
+    )
     if not item_id:
         logger.warning("[eBayAPI] no item_id for listing id=%s", row.get("id"))
         return {
@@ -312,28 +321,25 @@ def fetch_live_snapshot(row: dict) -> dict:
             "live": False,
             "current_price": row.get("current_price"),
             "bid_count": row.get("bid_count"),
+            "qty_sold": None,
+            "listing_status": None,
+            "selling_state": None,
             "market_price": row.get("market_price"),
         }
 
-    # Step 1: Browse (likely live)
-    browse_data = None
+    # Try Browse for live stuff
     try:
         browse_data = _call_browse(item_id)
-    except EbayApiRateLimited as e:
-        logger.warning("[eBayAPI] Browse rate-limited for %s: %s", item_id, e)
-    except EbayApiTempError as e:
-        logger.warning("[eBayAPI] Browse temp error for %s: %s", item_id, e)
-    except requests.RequestException as e:
-        logger.warning("[eBayAPI] Browse network fail for %s: %s", item_id, e)
+        if browse_data:
+            return _interpret_browse_json(browse_data, row)
+    except (EbayApiRateLimited, EbayApiTempError, requests.RequestException) as e:
+        logger.warning("[eBayAPI] Browse error for %s: %s", item_id, e)
 
-    if browse_data:
-        return _interpret_browse_json(browse_data, row)
-
-    # Step 2: Trading (truth for ended stuff)
+    # Fallback to Trading for ended stuff
     try:
         item_node = _call_trading_getitem(item_id)
-    except EbayApiRateLimited as e:
-        logger.warning("[eBayAPI] Trading rate-limited for %s: %s", item_id, e)
+    except (EbayApiRateLimited, EbayApiTempError, requests.RequestException) as e:
+        logger.warning("[eBayAPI] Trading error for %s: %s", item_id, e)
         return {
             "ended": False,
             "sold": False,
@@ -341,33 +347,14 @@ def fetch_live_snapshot(row: dict) -> dict:
             "live": False,
             "current_price": row.get("current_price"),
             "bid_count": row.get("bid_count"),
-            "market_price": row.get("market_price"),
-        }
-    except EbayApiTempError as e:
-        logger.warning("[eBayAPI] Trading temp error for %s: %s", item_id, e)
-        return {
-            "ended": False,
-            "sold": False,
-            "final_price": None,
-            "live": False,
-            "current_price": row.get("current_price"),
-            "bid_count": row.get("bid_count"),
-            "market_price": row.get("market_price"),
-        }
-    except requests.RequestException as e:
-        logger.warning("[eBayAPI] Trading network fail for %s: %s", item_id, e)
-        return {
-            "ended": False,
-            "sold": False,
-            "final_price": None,
-            "live": False,
-            "current_price": row.get("current_price"),
-            "bid_count": row.get("bid_count"),
+            "qty_sold": None,
+            "listing_status": None,
+            "selling_state": None,
             "market_price": row.get("market_price"),
         }
 
     if item_node is None:
-        # eBay nuked visibility but it's over
+        # Trading says no item -> ended, no sale info
         return {
             "ended": True,
             "sold": False,
@@ -375,20 +362,69 @@ def fetch_live_snapshot(row: dict) -> dict:
             "live": False,
             "current_price": None,
             "bid_count": row.get("bid_count"),
+            "qty_sold": None,
+            "listing_status": None,
+            "selling_state": None,
             "market_price": row.get("market_price"),
         }
 
     trading_snap = _interpret_trading_item(item_node)
 
-    # Merge Trading truth with our context
-    out = {
+    return {
         "ended": trading_snap["ended"],
         "sold": trading_snap["sold"],
         "final_price": trading_snap["final_price"],
         "live": trading_snap["live"],
-        "current_price": None,  # for ended listings final_price is truth
-        "bid_count": row.get("bid_count"),
+        "current_price": None,
+        "bid_count": trading_snap["bid_count"],
+        "qty_sold": trading_snap["qty_sold"],
+        "listing_status": trading_snap["listing_status"],
+        "selling_state": trading_snap["selling_state"],
         "market_price": row.get("market_price"),
     }
 
-    return out
+
+def fetch_trading_only(item_id: str) -> dict:
+    """
+    HARD MODE.
+    Skip Browse completely. Ask Trading right now.
+    Used when the auction is definitely over (e.g. >=30 mins past end_time).
+    Returns same shape as fetch_live_snapshot().
+    """
+    try:
+        item_node = _call_trading_getitem(item_id)
+    except EbayApiRateLimited:
+        # caller will treat this as "we couldn't confirm yet"
+        raise
+    except EbayApiTempError:
+        raise
+    except requests.RequestException as e:
+        raise EbayApiTempError(str(e))
+
+    if item_node is None:
+        # ended but Trading isn't giving us sale info
+        return {
+            "ended": True,
+            "sold": False,
+            "final_price": None,
+            "live": False,
+            "current_price": None,
+            "bid_count": None,
+            "qty_sold": None,
+            "listing_status": None,
+            "selling_state": None,
+        }
+
+    snap = _interpret_trading_item(item_node)
+
+    return {
+        "ended": snap["ended"],
+        "sold": snap["sold"],
+        "final_price": snap["final_price"],
+        "live": snap["live"],
+        "current_price": None,
+        "bid_count": snap["bid_count"],
+        "qty_sold": snap["qty_sold"],
+        "listing_status": snap["listing_status"],
+        "selling_state": snap["selling_state"],
+    }

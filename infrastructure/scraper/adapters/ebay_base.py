@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import time
 from time import perf_counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 from collections import deque
+from psycopg2.extras import execute_values
 
 import requests
 
@@ -14,12 +15,20 @@ from infrastructure.utils.model_key import normalise_model
 from infrastructure.db.schema import (
     resolve_source_id,
     resolve_source_field,
-    bulk_upsert_auction_listings,
-    bulk_append_price_history,
+    get_connection,
+    to_aware_utc,
+    ensure_utc_session
 )
 from infrastructure.utils.usage_tracker import increment_api_usage
 
 logger = get_logger(__name__)
+
+connection = get_connection()
+
+# -----------------
+# Constants / defaults
+# -----------------
+DEFAULT_Q = "a"  # minimal harmless primary query to satisfy Browse's rule
 
 
 # ----------------------------------------------------------------------
@@ -51,6 +60,10 @@ def _secs_left(end_time: Optional[datetime]) -> Optional[int]:
     delta = (end_aware - now_aware).total_seconds()
     return int(delta) if delta > 0 else 0
 
+
+def _iso_z(dt: datetime) -> str:
+    # ISO8601 with Z suffix
+    return dt.replace(microsecond=0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
 # ----------------------------------------------------------------------
 # Base Adapter
@@ -176,10 +189,6 @@ class EbayAdapterBase:
         return filtered
 
     def flush_batch(self):
-        """
-        Write accumulated listing rows + price history rows to DB
-        in bulk, then clear buffers.
-        """
         if not self._batch_buffer and not self._ph_buffer:
             return
 
@@ -188,12 +197,10 @@ class EbayAdapterBase:
         n_hist = len(self._ph_buffer)
 
         try:
-            # ✅ DEDUPE listings on external_id before bulk upsert
             if n_list:
                 deduped = {}
                 for row in self._batch_buffer:
                     ext_id = row.get("external_id")
-                    # last one wins, doesn't matter which because they're same listing
                     deduped[ext_id] = row
                 safe_rows = list(deduped.values())
 
@@ -224,6 +231,7 @@ class EbayAdapterBase:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "X-EBAY-C-MARKETPLACE-ID": "EBAY_GB",
         }
 
     def _fetch_category_items(
@@ -233,16 +241,11 @@ class EbayAdapterBase:
             sale_type: str | None = None,
             limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """
-        Hit eBay Browse API for a given category.
-        sale_type: "bin", "auction", or None for all.
-        """
         base = os.getenv("EBAY_API_BASE", "").rstrip("/")
         if not base:
             logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
             return []
 
-        # Map our sale_type to eBay's listingType filter
         listing_filter = None
         if sale_type == "bin":
             listing_filter = "FIXED_PRICE"
@@ -291,90 +294,128 @@ class EbayAdapterBase:
         return items
 
     def _fetch_seller_items(
-        self,
-        token: str,
-        seller_username: str,
-        sale_type: str | None = None,
-        limit: int = 50,
+            self,
+            token: str,
+            seller_username: str,
+            sale_type: str | None = None,
+            limit: int = 50,
     ) -> list[dict[str, Any]]:
+        """
+        Fetch ONLY items from a specific seller using the Browse API.
+        - Uses filter=sellers:{username} (correct filter)
+        - Bounds by itemEndDate window to avoid 12023 "too large" errors
+        - Includes a tiny q='a' solely to satisfy Browse's required primary param
+        """
         base = os.getenv("EBAY_API_BASE", "").rstrip("/")
         if not base:
             logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
             return []
 
+        # Map "bin"/"auction" to Browse API buyingOptions
         buying_opt = None
         if sale_type == "bin":
             buying_opt = "FIXED_PRICE"
         elif sale_type == "auction":
             buying_opt = "AUCTION"
 
-        filter_bits = [f"seller_username:{{{seller_username}}}"]
-        if buying_opt:
-            filter_bits.append(f"buyingOptions:{{{buying_opt}}}")
-        filter_param = ",".join(filter_bits)
+        # Try wider window first, then tighten if eBay complains
+        window_days_options = [60, 14, 7]
 
         all_items: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
 
-        offset = 0
-        page_count = 0
-        while True:
-            qs = [
-                "q=a",
-                f"filter={filter_param}",
-                f"limit={limit}",
-                f"offset={offset}",
-                "sort=endingSoon",
+        for days in window_days_options:
+            start_iso = _iso_z(datetime.now(timezone.utc))
+            end_iso = _iso_z(datetime.now(timezone.utc) + timedelta(days=days))
+
+            filter_bits = [
+                f"sellers:{{{seller_username}}}",
+                f"itemEndDate:[{start_iso}..{end_iso}]",
+                "itemLocationCountry:GB",
             ]
-            url = f"{base}/buy/browse/v1/item_summary/search?" + "&".join(qs)
+            if buying_opt:
+                filter_bits.append(f"buyingOptions:{{{buying_opt}}}")
+            filter_param = ",".join(filter_bits)
 
-            t_api_start = perf_counter()
-            try:
-                r = requests.get(url, headers=self._build_headers(token), timeout=10)
-            except Exception as e:
-                logger.warning(f"[{self.DOMAIN}] API request failed seller={seller_username} ({sale_type}): {e}")
+            offset = 0
+            page_count = 0
+
+            while True:
+                qs = [
+                    f"q={DEFAULT_Q}",  # required by Browse; filters do the real work
+                    f"filter={filter_param}",  # seller + window + (optional) buyingOptions
+                    f"limit={limit}",
+                    f"offset={offset}",
+                    "sort=endingSoon",
+                ]
+                url = f"{base}/buy/browse/v1/item_summary/search?" + "&".join(qs)
+
+                t_api_start = perf_counter()
+                try:
+                    r = requests.get(url, headers=self._build_headers(token), timeout=10)
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.DOMAIN}] API request failed seller={seller_username} ({sale_type}): {e}"
+                    )
+                    break
+
+                self._hist_api.append(perf_counter() - t_api_start)
+
+                if r.status_code != 200:
+                    txt = (r.text or "").lower()
+                    logger.warning(
+                        f"[{self.DOMAIN}] API seller={seller_username} status {r.status_code}: {r.text[:200]}"
+                    )
+                    # If "too large", break to next (tighter) window; otherwise bail
+                    if r.status_code == 400 and ("too large" in txt or "too many" in txt):
+                        break
+                    else:
+                        return all_items  # return what we have so far (likely empty)
+                increment_api_usage("ebay")
+
+                try:
+                    payload = r.json()
+                except Exception as e:
+                    logger.warning(f"[{self.DOMAIN}] bad JSON seller={seller_username}: {e}")
+                    break
+
+                items = payload.get("itemSummaries") or payload.get("item_summary") or []
+                if not isinstance(items, list) or not items:
+                    break
+
+                # de-dupe across pages
+                new_batch = []
+                for it in items:
+                    iid = it.get("itemId")
+                    if not iid or iid in seen_ids:
+                        continue
+                    seen_ids.add(iid)
+                    new_batch.append(it)
+
+                if not new_batch:
+                    break
+
+                all_items.extend(new_batch)
+
+                page_count += 1
+                if page_count >= getattr(self, "MAX_PAGES", 10):
+                    logger.info(
+                        f"[{self.DOMAIN}] seller={seller_username} reached page cap ({page_count})"
+                    )
+                    break
+                if len(all_items) >= getattr(self, "MAX_LISTINGS", 1000):
+                    logger.info(
+                        f"[{self.DOMAIN}] seller={seller_username} reached MAX_LISTINGS"
+                    )
+                    break
+
+                offset += limit
+                time.sleep(0.25)
+
+            # if we fetched anything in this window, stop tightening
+            if all_items:
                 break
 
-            self._hist_api.append(perf_counter() - t_api_start)
-            if r.status_code != 200:
-                logger.warning(
-                    f"[{self.DOMAIN}] API seller={seller_username} status {r.status_code}: {r.text[:200]}"
-                )
-                break
-            increment_api_usage("ebay")
-
-            try:
-                payload = r.json()
-            except Exception as e:
-                logger.warning(f"[{self.DOMAIN}] bad JSON seller={seller_username}: {e}")
-                break
-
-            items = payload.get("itemSummaries") or payload.get("item_summary") or []
-            if not isinstance(items, list) or not items:
-                break
-
-            new_batch = []
-            for it in items:
-                iid = it.get("itemId")
-                if not iid or iid in seen_ids:
-                    continue
-                seen_ids.add(iid)
-                new_batch.append(it)
-
-            if not new_batch:
-                break
-            all_items.extend(new_batch)
-
-            page_count += 1
-            if page_count >= getattr(self, "MAX_PAGES", 10):
-                logger.info(f"[{self.DOMAIN}] seller={seller_username} reached page cap ({page_count})")
-                break
-            if len(all_items) >= getattr(self, "MAX_LISTINGS", 1000):
-                logger.info(f"[{self.DOMAIN}] seller={seller_username} reached MAX_LISTINGS")
-                break
-
-            offset += limit
-            time.sleep(0.25)
         return all_items
 
     def _normalize_item(self, raw: dict[str, Any], sale_type: str):
@@ -390,7 +431,8 @@ class EbayAdapterBase:
         time_left_s = _secs_left(end_time)
         bids_count = 0
 
-        if sale_type == "bin" and buying_opts == ["AUCTION"]:
+        # sanity: drop mismatched type
+        if sale_type == "bin" and ("AUCTION" in buying_opts):
             return None
         if sale_type == "auction" and "AUCTION" not in buying_opts:
             return None
@@ -447,7 +489,6 @@ class EbayAdapterBase:
                 return
 
             for sale_type in sale_types:
-                t0 = perf_counter()
                 items = self._fetch_seller_items(ebay_token, seller, sale_type)
                 if not items:
                     logger.info(f"[{self.DOMAIN}] seller {seller} {sale_type}: 0 items")
@@ -459,6 +500,19 @@ class EbayAdapterBase:
                     if not norm:
                         continue
                     row, ph = norm
+
+                    # HARD GATE: only keep exact seller match
+                    if row["seller_username"].lower().strip() != seller.lower().strip():
+                        logger.debug(
+                            "[%s] skipping foreign seller '%s' (wanted '%s') itemId=%s title=%r",
+                            self.DOMAIN,
+                            row["seller_username"],
+                            seller,
+                            row.get("external_id"),
+                            row.get("title"),
+                        )
+                        continue
+
                     self._batch_buffer.append(row)
                     if row["price_current"]:
                         self._ph_buffer.append(ph)
@@ -477,7 +531,6 @@ class EbayAdapterBase:
         # -------------------------
         for cat_id in self.CATEGORY_IDS:
             for sale_type in sale_types:
-                t0 = perf_counter()
                 items = self._fetch_category_items(ebay_token, cat_id, sale_type)
                 if not items:
                     logger.info(f"[{self.DOMAIN}] cat {cat_id} {sale_type}: 0 items")
@@ -500,3 +553,71 @@ class EbayAdapterBase:
                 time.sleep(self.CATEGORY_PAUSE_SECONDS)
 
         self.flush_batch()
+
+def ensure_utc_session(cur):
+    try:
+        cur.execute("SET TIME ZONE 'UTC'")
+    except Exception:
+        pass
+
+def bulk_append_price_history(rows: list[tuple[str, int, int]]):
+    """
+    rows: (external_id, price, bids_count)
+    """
+    if not rows:
+        return
+    sql = """
+        INSERT INTO auction_price_history (external_id, price, bids_count, recorded_at)
+        VALUES %s
+        ON CONFLICT DO NOTHING
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
+        execute_values(
+            cur,
+            sql,
+            rows,
+            template="(%s, %s, %s, (now() AT TIME ZONE 'utc'))",
+            page_size=500,
+        )
+
+def bulk_upsert_auction_listings(rows: list[dict]):
+    """
+    Bulk upsert of listings data from scrapers.
+    """
+    if not rows:
+        return
+    cols = [
+        "source", "external_id", "title", "price_current", "bids_count", "end_time",
+        "url", "detail_url", "sale_type", "roi_estimate", "max_bid", "notes",
+        "source_id", "model_key", "time_left_s", "status"
+    ]
+    values = [tuple(r.get(c) for c in cols) for r in rows]
+
+    sql = f"""
+        INSERT INTO auction_listings ({", ".join(cols)})
+        VALUES %s
+        ON CONFLICT (external_id) DO UPDATE
+        SET title         = EXCLUDED.title,
+            price_current = COALESCE(EXCLUDED.price_current, auction_listings.price_current),
+            bids_count    = COALESCE(EXCLUDED.bids_count,    auction_listings.bids_count),
+            end_time      = COALESCE(EXCLUDED.end_time,      auction_listings.end_time),
+            url           = EXCLUDED.url,
+            detail_url    = EXCLUDED.detail_url,
+            sale_type     = EXCLUDED.sale_type,
+            roi_estimate  = EXCLUDED.roi_estimate,
+            max_bid       = EXCLUDED.max_bid,
+            notes         = EXCLUDED.notes,
+            source_id     = EXCLUDED.source_id,
+            model_key     = COALESCE(EXCLUDED.model_key,     auction_listings.model_key),
+            time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
+            status        = COALESCE(EXCLUDED.status,        auction_listings.status),
+            last_seen     = (now() AT TIME ZONE 'utc')
+    """
+    conn = connection
+    with conn, conn.cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("SET LOCAL synchronous_commit TO OFF;")
+        execute_values(cur, sql, values, page_size=250)

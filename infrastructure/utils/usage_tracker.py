@@ -29,3 +29,23 @@ def increment_api_usage(service: str, count: int = 1) -> int:
 
     logger.info("[Usage] %s calls today = %s", service, new_total)
     return new_total
+
+
+
+def get_api_usage_today(service: str) -> int:
+    """
+    Return today's API usage count for the given service.
+    If no entry exists yet, returns 0.
+    """
+    with connection, connection.cursor() as cur:
+        cur.execute(
+            """
+            SELECT call_count
+            FROM api_usage
+            WHERE service = %s
+              AND date = CURRENT_DATE
+            """,
+            (service,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0

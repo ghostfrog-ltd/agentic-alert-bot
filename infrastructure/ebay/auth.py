@@ -5,11 +5,12 @@ import os
 import time
 import requests
 from typing import Optional
+from datetime import timezone, datetime
 
 from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import (
-    load_cached_ebay_token,
-    save_cached_ebay_token,
+    get_connection,
+    ensure_utc_session
 )
 from infrastructure.utils.usage_tracker import increment_api_usage  # ✅ add this
 
@@ -37,8 +38,8 @@ class EbayAuth:
     """
 
     def __init__(self):
-        self.app_id = os.getenv("EBAY_APP_ID")          # aka Client ID
-        self.cert_id = os.getenv("EBAY_CERT_ID")        # aka Client Secret
+        self.app_id = os.getenv("EBAY_APP_ID")  # aka Client ID
+        self.cert_id = os.getenv("EBAY_CERT_ID")  # aka Client Secret
         self.api_base = os.getenv("EBAY_API_BASE", "").rstrip("/")
         self.scope = os.getenv(
             "EBAY_OAUTH_SCOPE",
@@ -62,8 +63,8 @@ class EbayAuth:
         """
         now = time.time()
         return (
-            self._token is None
-            or now >= (self._token_expiry_ts - 60)
+                self._token is None
+                or now >= (self._token_expiry_ts - 60)
         )
 
     def _try_load_from_process_cache(self) -> bool:
@@ -196,6 +197,47 @@ class EbayAuth:
 
 # singleton accessor
 _auth_singleton: Optional[EbayAuth] = None
+
+
+def load_cached_ebay_token() -> Optional[tuple[str, float]]:
+    """
+    Returns (token, expiry_epoch_seconds) if we have a row.
+    Does NOT enforce freshness; caller decides if expired.
+    """
+    with get_connection().cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            SELECT token, expiry_ts
+            FROM ebay_app_token
+            WHERE id = 1
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    token, expiry_ts = row  # expiry_ts is timestamptz -> Python datetime
+    expiry_epoch = expiry_ts.replace(tzinfo=timezone.utc).timestamp()
+    return token, expiry_epoch
+
+def save_cached_ebay_token(token: str, expiry_epoch: float) -> None:
+    """
+    Upsert token+expiry in DB for reuse next run.
+    expiry_epoch is epoch seconds UTC.
+    """
+    expiry_dt = datetime.fromtimestamp(expiry_epoch, tz=timezone.utc)
+
+    with get_connection(), get_connection().cursor() as cur:
+        ensure_utc_session(cur)
+        cur.execute("""
+            INSERT INTO ebay_app_token (id, token, expiry_ts, updated_at)
+            VALUES (1, %s, %s, (now() AT TIME ZONE 'utc'))
+            ON CONFLICT (id) DO UPDATE
+                SET token = EXCLUDED.token,
+                    expiry_ts = EXCLUDED.expiry_ts,
+                    updated_at = (now() AT TIME ZONE 'utc')
+        """, (token, expiry_dt))
 
 def get_auth() -> EbayAuth:
     global _auth_singleton

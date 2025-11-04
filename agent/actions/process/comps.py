@@ -1,8 +1,10 @@
 # agent/actions/process/comps.py
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
 from infrastructure.db.schema import ensure_utc_session
 from infrastructure.utils import db_connection
 from infrastructure.utils.logger import get_logger
@@ -13,9 +15,11 @@ connection = db_connection.connection
 # ---------------------------------
 # Tunable knobs
 # ---------------------------------
-COMPS_WINDOW_DAYS: int = 30  # how many days of history to aggregate
-COMPS_MIN_INTERVAL_HOURS: int = 24  # minimum time between full recomputes
-COMPS_KEEP_PER_KEY: int = 60  # how many snapshots per model_key to retain
+# Default logical window; can be overridden at runtime via GF_COMPS_WINDOW_DAYS
+COMPS_WINDOW_DAYS: int = 30          # how many days of history to aggregate
+COMPS_MIN_INTERVAL_HOURS: int = 24   # minimum time between full recomputes
+COMPS_KEEP_PER_KEY: int = 60         # how many snapshots per model_key to retain
+NO_KEY_BUCKET: str = "no_key"        # synthetic key for rows with model_key IS NULL
 
 
 # ---------------------------------
@@ -44,29 +48,83 @@ def _get_last_run() -> Optional[datetime]:
     return row[0]
 
 
-def _compute_daily_comps(days: int = COMPS_WINDOW_DAYS) -> None:
+def _get_window_days() -> int:
     """
-    Insert new per-model_key stats for the last N days of sold/confirmed listings.
-    Mirrors the old compute_daily_comps() in schema.py.
+    Resolve the effective window in days, allowing an override via
+    the GF_COMPS_WINDOW_DAYS environment variable.
+
+    - If GF_COMPS_WINDOW_DAYS is a positive int, we use that.
+    - Otherwise we fall back to COMPS_WINDOW_DAYS.
     """
-    logger.info("[process.comps] computing daily comps for last %s days", days)
-    sql = """
-        INSERT INTO comps (model_key, median_final_price, mean_final_price, samples, computed_at)
-        SELECT model_key,
-               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY final_price)::numeric AS median_final_price,
-               AVG(final_price)::numeric AS mean_final_price,
-               COUNT(*)::int AS samples,
-               (now() AT TIME ZONE 'utc') AS computed_at
-        FROM auction_listings
-        WHERE status IN ('sold')
-          AND final_price IS NOT NULL
-          AND model_key IS NOT NULL
-          AND end_time >= (now() AT TIME ZONE 'utc' - (%s || ' days')::interval)
-        GROUP BY model_key
+    env_val = os.getenv("GF_COMPS_WINDOW_DAYS")
+    if env_val:
+        try:
+            days = int(env_val)
+            if days > 0:
+                return days
+        except ValueError:
+            logger.warning(
+                "[process.comps] invalid GF_COMPS_WINDOW_DAYS=%r (must be positive int); "
+                "falling back to COMPS_WINDOW_DAYS=%d",
+                env_val,
+                COMPS_WINDOW_DAYS,
+            )
+    return COMPS_WINDOW_DAYS
+
+
+def _truncate_comps() -> None:
     """
+    Completely clear the comps table before recomputing.
+    Ensures we always have a single fresh snapshot.
+    """
+    logger.info("[process.comps] truncating comps table before recompute")
     with connection, connection.cursor() as cur:
         _ensure_utc_session(cur)
-        cur.execute(sql, (str(days),))
+        cur.execute("TRUNCATE TABLE comps;")
+
+
+def _compute_daily_comps(days: Optional[int] = None) -> None:
+    """
+    Insert new per-model_key stats for the last N days of sold listings.
+
+    - Uses COALESCE(final_price, price_current) as the realized sale price.
+    - Groups by COALESCE(model_key, NO_KEY_BUCKET), so rows with model_key IS NULL
+      are aggregated into a synthetic 'no_key' bucket.
+    - Uses a configurable time window:
+        - default COMPS_WINDOW_DAYS, or
+        - override via GF_COMPS_WINDOW_DAYS env var, or
+        - explicit 'days' argument (if provided).
+    """
+    if days is None:
+        days = _get_window_days()
+
+    logger.info(
+        "[process.comps] computing daily comps for last %s days "
+        "(model_key NULL → %r, price = COALESCE(final_price, price_current))",
+        days,
+        NO_KEY_BUCKET,
+    )
+
+    sql = """
+        INSERT INTO comps (model_key, median_final_price, mean_final_price, samples, computed_at)
+        SELECT
+            COALESCE(model_key, %s) AS model_key,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (
+                ORDER BY COALESCE(final_price, price_current)
+            )::numeric AS median_final_price,
+            AVG(COALESCE(final_price, price_current))::numeric AS mean_final_price,
+            COUNT(*)::int AS samples,
+            (now() AT TIME ZONE 'utc') AS computed_at
+        FROM auction_listings
+        WHERE status IN ('sold')
+          AND COALESCE(final_price, price_current) IS NOT NULL
+          AND end_time >= (now() AT TIME ZONE 'utc' - (%s || ' days')::interval)
+        GROUP BY COALESCE(model_key, %s)
+    """
+
+    with connection, connection.cursor() as cur:
+        _ensure_utc_session(cur)
+        cur.execute(sql, (NO_KEY_BUCKET, str(days), NO_KEY_BUCKET))
 
 
 def _prune_old_comps(keep_per_key: int = COMPS_KEEP_PER_KEY) -> None:
@@ -111,6 +169,10 @@ def run(force: bool = False) -> None:
     - If force=False, only runs if last run was >= COMPS_MIN_INTERVAL_HOURS ago
       (or comps is empty).
     - If force=True, always recomputes regardless of last_run timestamp.
+
+    Effective window:
+      - COMPS_WINDOW_DAYS by default
+      - or GF_COMPS_WINDOW_DAYS env var if set to a positive integer
     """
     try:
         now_utc = datetime.now(timezone.utc)
@@ -132,15 +194,20 @@ def run(force: bool = False) -> None:
             )
             return
 
+        window_days = _get_window_days()
         logger.info(
-            "[process.comps] starting recompute (force=%s, last_run=%s, age=%s)",
+            "[process.comps] starting recompute (force=%s, last_run=%s, age=%s, window_days=%s)",
             force,
             last_run,
             age,
+            window_days,
         )
 
-        # 1) compute fresh snapshot
-        _compute_daily_comps(COMPS_WINDOW_DAYS)
+        # 0) truncate for a clean rebuild
+        _truncate_comps()
+
+        # 1) compute fresh snapshot for the current window
+        _compute_daily_comps(window_days)
 
         # 2) housekeeping (best-effort)
         try:

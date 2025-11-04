@@ -1,3 +1,4 @@
+# agent/actions/alert/roi_listings.py
 from __future__ import annotations
 
 """
@@ -9,7 +10,7 @@ estimate profit/ROI, and:
 - Log the best opportunities
 - Record them in alerts (deduped by external_id)
 - Optionally send an HTML email digest of newly-created opportunities
-- Persist roi_estimate back onto auction_listings
+- Persist roi_estimate + max_bid back onto auction_listings
 """
 
 from dataclasses import dataclass
@@ -147,15 +148,13 @@ def _estimate_profit(
 
 
 # --------------------------------
-# DB helpers (imports moved *inside* to avoid circulars)
+# DB helpers
 # --------------------------------
 def _fetch_active_listings() -> List[Dict[str, Any]]:
     """
     Pull listings that are still live/active and have a current price.
-    We normalise status with LOWER(status) so we don't miss rows if adapters
-    used different casing historically ('OPEN' vs 'open').
     """
-    from infrastructure.db import schema  # local import to avoid circular on import
+    from infrastructure.db import schema  # local import
 
     q = """
         SELECT
@@ -177,29 +176,6 @@ def _fetch_active_listings() -> List[Dict[str, Any]]:
         schema.ensure_utc_session(cur)
         cur.execute(q)
         return list(cur.fetchall())
-
-
-def _comps_lookup() -> Dict[str, Dict[str, Any]]:
-    """
-    Returns latest comps per model_key from DB.
-    shape: {
-      model_key: {
-        "model_key": "...",
-        "median_final_price": <Decimal or float>,
-        "mean_final_price": <Decimal or float>,
-        "samples": <int>,
-        "computed_at": <datetime>,
-      },
-      ...
-    }
-    """
-    from infrastructure.db import schema  # local import
-
-    try:
-        return latest_comps_map()
-    except Exception as e:
-        logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
-        return {}
 
 
 def latest_comps_map() -> Dict[str, Dict[str, Any]]:
@@ -225,6 +201,54 @@ def latest_comps_map() -> Dict[str, Dict[str, Any]]:
         return {r["model_key"]: r for r in rows}
 
 
+def _comps_lookup() -> Dict[str, Dict[str, Any]]:
+    """
+    Returns latest comps per model_key from DB.
+    """
+    try:
+        return latest_comps_map()
+    except Exception as e:
+        logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
+        return {}
+
+
+def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, int | None]:
+    """
+    Insert or update an alert row.
+    Returns (created_now, alert_id).
+
+    NOTE: requires a UNIQUE constraint or index on alerts.external_id, e.g.:
+
+        ALTER TABLE alerts
+        ADD CONSTRAINT alerts_external_id_key UNIQUE (external_id);
+    """
+    from infrastructure.db import schema
+
+    conn = schema.get_connection()
+    with conn:
+        with conn.cursor() as cur:
+            schema.ensure_utc_session(cur)
+            cur.execute(
+                """
+                INSERT INTO alerts (external_id, score, max_bid, created_at, updated_at)
+                VALUES (%s, %s, %s, (now() AT TIME ZONE 'utc'), (now() AT TIME ZONE 'utc'))
+                ON CONFLICT (external_id) DO UPDATE
+                    SET score = EXCLUDED.score,
+                        max_bid = EXCLUDED.max_bid,
+                        updated_at = (now() AT TIME ZONE 'utc')
+                RETURNING id, (xmax = 0) AS inserted;
+                """,
+                (external_id, score, max_bid),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return False, None
+
+    created_now = bool(row[1])
+    return created_now, row[0]
+
+
 def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
     """
     Persist this opportunity to alerts, deduped by external_id.
@@ -235,13 +259,11 @@ def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
     if not RECORD_ALERTS:
         return False, None
 
-    from infrastructure.db import schema  # local import
-
     try:
         # naive ceiling: resale median minus fees and outbound ship cost
         est_cap = op.comps_median - op.fees - op.outbound_ship
 
-        created_now, alert_id = schema.record_alert(
+        created_now, alert_id = record_alert(
             op.external_id,
             score=float(op.profit),
             max_bid=float(_money(est_cap)),
@@ -260,13 +282,17 @@ def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
 def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
     from infrastructure.db import schema  # local import
 
-    with schema.get_connection(), schema.get_connection().cursor() as cur:
+    conn = schema.get_connection()
+    with conn, conn.cursor() as cur:
         schema.ensure_utc_session(cur)
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO alert_state (name, last_sent_at)
             VALUES (%s, %s)
             ON CONFLICT (name) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
-        """, (name, schema.to_aware_utc(when) if when else None))
+            """,
+            (name, schema.to_aware_utc(when) if when else None),
+        )
 
 
 def _send_email_digest(new_ops: List[Opportunity]) -> None:
@@ -317,8 +343,8 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         send_email(
             subject=subject,
             body=body_html,
-            to_addr=TO_EMAIL,   # MUST be to_addr
-            is_html=True,       # HTML email is allowed
+            to_addr=TO_EMAIL,
+            is_html=True,
         )
         set_alert_last_sent(ALERT_NAME)
         logger.info(
@@ -333,16 +359,13 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
 # --------------------------------
 # Core shortlist logic
 # --------------------------------
-def _shortlist(
+def _build_all_opps_for_roi(
     listings: List[Dict[str, Any]],
     comps_by_model: Dict[str, Dict[str, Any]],
 ) -> List[Opportunity]:
     """
-    For each active listing:
-      - If we have comps for its model_key
-      - And enough samples
-      - And profit/ROI clears thresholds
-    ...then we wrap it as an Opportunity.
+    Build Opportunity objects for ROI/max_bid updates, without applying
+    the profit/ROI thresholds used for alerts. Still requires decent comps.
     """
     out: List[Opportunity] = []
 
@@ -354,7 +377,6 @@ def _shortlist(
         model_key = li.get("model_key")
         ask_price = float(li.get("price_current") or 0.0)
 
-        # can't do anything without model normalisation
         if not model_key:
             continue
 
@@ -365,7 +387,68 @@ def _shortlist(
         comps_median = float(comp.get("median_final_price") or 0.0)
         comps_samples = int(comp.get("samples") or 0)
 
-        # filter out weak comps
+        # require at least some comp quality
+        if comps_samples < 3 or comps_median <= 0.0:
+            continue
+
+        _min_profit, _min_roi, outbound_ship, fee_rate = _source_cfg(source)
+
+        fees, profit, roi = _estimate_profit(
+            ask_price=ask_price,
+            comps_median=comps_median,
+            fee_rate=fee_rate,
+            outbound_ship=outbound_ship,
+            inbound_ship=INBOUND_SHIP_DEFAULT_GBP,
+        )
+
+        out.append(
+            Opportunity(
+                source=source,
+                external_id=external_id,
+                title=title,
+                url=url,
+                model_key=model_key,
+                comps_samples=comps_samples,
+                comps_median=_money(comps_median),
+                purchase_cost=_money(ask_price + INBOUND_SHIP_DEFAULT_GBP),
+                outbound_ship=_money(outbound_ship),
+                fees=_money(fees),
+                profit=_money(profit),
+                roi=roi,
+            )
+        )
+
+    return out
+
+
+def _shortlist(
+    listings: List[Dict[str, Any]],
+    comps_by_model: Dict[str, Dict[str, Any]],
+) -> List[Opportunity]:
+    """
+    Same as _build_all_opps_for_roi, but applies MIN_PROFIT_GBP / MIN_ROI
+    gates to decide "real opportunities" for alerts/email.
+    """
+    out: List[Opportunity] = []
+
+    for li in listings:
+        source = li.get("source") or ""
+        external_id = li.get("external_id") or ""
+        title = li.get("title") or ""
+        url = li.get("url") or ""
+        model_key = li.get("model_key")
+        ask_price = float(li.get("price_current") or 0.0)
+
+        if not model_key:
+            continue
+
+        comp = comps_by_model.get(model_key)
+        if not comp:
+            continue
+
+        comps_median = float(comp.get("median_final_price") or 0.0)
+        comps_samples = int(comp.get("samples") or 0)
+
         if comps_samples < 3 or comps_median <= 0.0:
             continue
 
@@ -379,7 +462,6 @@ def _shortlist(
             inbound_ship=INBOUND_SHIP_DEFAULT_GBP,
         )
 
-        # final gate
         if profit >= min_profit and roi >= min_roi:
             out.append(
                 Opportunity(
@@ -398,7 +480,6 @@ def _shortlist(
                 )
             )
 
-    # Sort best-first (profit first, ROI tie-break)
     out.sort(key=lambda o: (o.profit, o.roi), reverse=True)
     return out
 
@@ -415,13 +496,27 @@ def get_alert_last_sent(name: str) -> Optional[datetime]:
 
 def _update_roi_estimates(opps: List[Opportunity]) -> None:
     """
-    Persist roi_estimate + max_bid back onto auction_listings.
+    Persist roi_estimate + max_bid back onto auction_listings
+    for the supplied opportunities.
+
+    If core.scoring.snipe.suggest_max_bid is not available, we fall back
+    to a simple heuristic max_bid = 0.8 * comps_median.
     """
     if not opps:
         return
 
     from infrastructure.db import schema
-    from core.scoring.snipe import suggest_max_bid  # ✅ use your existing logic
+
+    # Try to use your proper snipe logic if it's available
+    try:
+        from core.scoring.snipe import suggest_max_bid as _suggest_max_bid  # type: ignore
+        have_snipe = True
+    except ModuleNotFoundError:
+        have_snipe = False
+        logger.warning(
+            "[roi_listings] core.scoring.snipe not available; "
+            "falling back to simple max_bid heuristic (0.8 * comps_median)"
+        )
 
     try:
         conn = schema.get_connection()
@@ -429,16 +524,26 @@ def _update_roi_estimates(opps: List[Opportunity]) -> None:
             schema.ensure_utc_session(cur)
             rows = []
             for op in opps:
-                # Use your helper to compute the ceiling bid
-                max_bid = float(suggest_max_bid(op.comps_median))
+                if have_snipe:
+                    # Use your proper snipe logic
+                    max_bid = float(_suggest_max_bid(op.comps_median))
+                else:
+                    # Fallback: 80% of comps median as a rough ceiling
+                    max_bid = float(_money(op.comps_median * 0.8))
+
                 rows.append((float(op.roi), max_bid, op.external_id))
+
             cur.executemany(
                 "UPDATE auction_listings "
                 "SET roi_estimate = %s, max_bid = %s "
                 "WHERE external_id = %s",
                 rows,
             )
-        logger.info("[roi_listings] updated roi_estimate + max_bid for %d listings", len(opps))
+
+        logger.info(
+            "[roi_listings] updated roi_estimate + max_bid for %d listings",
+            len(opps),
+        )
     except Exception as e:
         logger.warning("[roi_listings] failed to update roi_estimate/max_bid: %s", e)
 
@@ -451,14 +556,12 @@ def run(limit_output: int = 20) -> List[Opportunity]:
     Main entry point:
       1. Pull active listings
       2. Join to latest comps
-      3. Filter for real flips (profit/ROI gates)
-      4. Persist roi_estimate back to auction_listings
+      3. Compute ROI for all listings with decent comps and persist roi_estimate/max_bid
+      4. Shortlist "real opportunities" using profit/ROI gates
       5. Log top N
       6. Record each opportunity in alerts (deduped)
       7. Optionally email only the *new* ones, with cooldown
     """
-    from infrastructure.db import schema  # local import
-
     # 1. load DB data
     try:
         listings = _fetch_active_listings()
@@ -468,7 +571,11 @@ def run(limit_output: int = 20) -> List[Opportunity]:
 
     comps_by_model = _comps_lookup()
 
-    # 2. shortlist profitable flips
+    # 2. compute ROI for all listings with comps and persist to DB
+    all_for_roi = _build_all_opps_for_roi(listings, comps_by_model)
+    _update_roi_estimates(all_for_roi)
+
+    # 3. shortlist profitable flips for alerts/emails
     opps = _shortlist(listings, comps_by_model)
     if not opps:
         logger.info(
@@ -478,10 +585,6 @@ def run(limit_output: int = 20) -> List[Opportunity]:
         )
         return []
 
-    # 2b. persist roi_estimate back to auction_listings
-    _update_roi_estimates(opps)
-
-    # 3. log top N for console visibility
     top = opps[:limit_output]
     logger.info(
         "[roi_listings] %d opportunities found (showing %d)",
@@ -491,7 +594,6 @@ def run(limit_output: int = 20) -> List[Opportunity]:
     for op in top:
         logger.info(op.as_log())
 
-    # 4. record / dedupe in alerts, collect brand new ones
     newly_created: List[Opportunity] = []
     if RECORD_ALERTS or SEND_EMAIL_DIGEST:
         for op in opps:
@@ -499,17 +601,13 @@ def run(limit_output: int = 20) -> List[Opportunity]:
             if created_now:
                 newly_created.append(op)
 
-    # 5. email digest of JUST the new ones, respecting cooldown
     if SEND_EMAIL_DIGEST and newly_created:
         last_sent = get_alert_last_sent(ALERT_NAME)
-
-        # If never sent, send now.
         if last_sent is None:
             _send_email_digest(newly_created)
         else:
             last_sent_aware = _to_aware_utc(last_sent)
             if last_sent_aware is None:
-                # DB gave us something weird/naive -> just send
                 _send_email_digest(newly_created)
             else:
                 since = _now_utc() - last_sent_aware

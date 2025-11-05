@@ -168,7 +168,8 @@ def tick():
             spent_total += phase_dt
 
         # Phase 2: SCRAPE SOURCES (ingest fresh listings via eBay API)
-        if spent_total < HEARTBEAT_BUDGET_S and feat_scrape and auth_ok and run_scrape:
+        if feat_scrape and auth_ok and run_scrape:
+            #if spent_total < HEARTBEAT_BUDGET_S and feat_scrape and auth_ok and run_scrape:
             t0 = perf_counter()
             try:
                 run_scrape(ebay_token=ebay_token)
@@ -217,7 +218,8 @@ def tick():
                 logger.error(f"[Heartbeat] roi FAILED in {phase_dt:.2f}s: {e}")
             spent_total += phase_dt
 
-        if feat_alerts and alert_new_listings and spent_total < HEARTBEAT_BUDGET_S:
+        #if feat_alerts and alert_new_listings and spent_total < HEARTBEAT_BUDGET_S:
+        if feat_alerts and alert_new_listings :
             t0 = perf_counter()
             try:
                 alert_new_listings()

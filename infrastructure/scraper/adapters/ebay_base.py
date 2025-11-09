@@ -65,6 +65,49 @@ def _iso_z(dt: datetime) -> str:
     # ISO8601 with Z suffix
     return dt.replace(microsecond=0, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
+
+def is_configurable_item(raw: dict[str, Any]) -> bool:
+    """
+    Detect multi-variation / configurable-style listings so we can skip them entirely.
+
+    Handles both:
+    - Legacy/Finding style: isMultiVariationListing
+    - Browse API style: itemGroupType == 'SELLER_DEFINED_VARIATIONS'
+    - Fallback: presence of variation-ish blocks
+    """
+    # Finding API style: {"isMultiVariationListing": "true"} or ["true"] or {"__value__": "true"}
+    val = raw.get("isMultiVariationListing")
+    if val is not None:
+        if isinstance(val, (list, tuple)):
+            if val:
+                val = val[0]
+        if isinstance(val, dict) and "__value__" in val:
+            val = val.get("__value__")
+        if isinstance(val, bool):
+            if val:
+                return True
+        elif isinstance(val, str) and val.lower() == "true":
+            return True
+
+    # Browse API style group listings
+    group_type = raw.get("itemGroupType")
+    if isinstance(group_type, str):
+        gt = group_type.strip().upper()
+        if gt in {"SELLER_DEFINED_VARIATIONS", "GROUP", "MULTI_SKU"}:
+            return True
+
+    # Very defensive fallback
+    if "variations" in raw or "variation" in raw:
+        return True
+
+    return False
+
+
+def get_item_id(raw: dict[str, Any]) -> str:
+    iid = raw.get("itemId") or raw.get("item_id") or raw.get("legacyItemId")
+    return str(iid) if iid is not None else "unknown"
+
+
 # ----------------------------------------------------------------------
 # Base Adapter
 # ----------------------------------------------------------------------
@@ -419,7 +462,23 @@ class EbayAdapterBase:
         return all_items
 
     def _normalize_item(self, raw: dict[str, Any], sale_type: str):
+
+        # HARD GATE: skip multi-variation / configurable-style listings entirely
+        if is_configurable_item(raw):
+            logger.info(
+                "[%s] skipping configurable/multi-variation listing itemId=%s title=%r",
+                self.DOMAIN,
+                get_item_id(raw),
+                raw.get("title"),
+            )
+            return None
+
         item_id = raw.get("itemId")
+
+        # Skip any legacy or malformed external_id (v1-prefixed junk)
+        if isinstance(item_id, str) and "v1" in item_id.lower():
+            return None
+
         title = raw.get("title") or ""
         buying_opts = raw.get("buyingOptions") or []
         seller_info = raw.get("seller") or {}
@@ -554,11 +613,13 @@ class EbayAdapterBase:
 
         self.flush_batch()
 
+
 def ensure_utc_session(cur):
     try:
         cur.execute("SET TIME ZONE 'UTC'")
     except Exception:
         pass
+
 
 def bulk_append_price_history(rows: list[tuple[str, int, int]]):
     """
@@ -582,6 +643,7 @@ def bulk_append_price_history(rows: list[tuple[str, int, int]]):
             template="(%s, %s, %s, (now() AT TIME ZONE 'utc'))",
             page_size=500,
         )
+
 
 def bulk_upsert_auction_listings(rows: list[dict]):
     """

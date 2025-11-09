@@ -4,9 +4,9 @@ from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import connection
 
 # Adapters
+from infrastructure.scraper.adapters.niche.ebay.motomine import Adapter as MotoMineAdapter
 from infrastructure.scraper.adapters.niche.ebay.consoles import Adapter as ConsolesAdapter
 from infrastructure.scraper.adapters.niche.ebay.retro_pc import Adapter as RetroPcAdapter
-from infrastructure.scraper.adapters.niche.ebay.motomine import Adapter as MotoMineAdapter
 from infrastructure.scraper.adapters.niche.ebay.actioncams import Adapter as ActionCamAdapter
 
 logger = get_logger(__name__)
@@ -78,9 +78,9 @@ def run(*, ebay_token: str):
     logger.info("[scrape] Begin scrape (API mode)")
 
     adapters = [
+        MotoMineAdapter(),
         ConsolesAdapter(),
         RetroPcAdapter(),
-        MotoMineAdapter(),
         ActionCamAdapter(),
     ]
 

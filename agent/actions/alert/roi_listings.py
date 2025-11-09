@@ -280,18 +280,29 @@ def _maybe_record_alert(op: Opportunity) -> tuple[bool, Optional[int]]:
 
 
 def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
+    """
+    Record that an alert was last sent at `when` (or now() if None).
+
+    Ensures last_sent_at is NEVER NULL so it satisfies the NOT NULL constraint
+    on alert_state.last_sent_at.
+    """
     from infrastructure.db import schema  # local import
 
     conn = schema.get_connection()
+
+    # If caller didn't pass a time, use "now" in UTC.
+    ts = _to_aware_utc(when) if when is not None else _now_utc()
+
     with conn, conn.cursor() as cur:
         schema.ensure_utc_session(cur)
         cur.execute(
             """
             INSERT INTO alert_state (name, last_sent_at)
             VALUES (%s, %s)
-            ON CONFLICT (name) DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
+            ON CONFLICT (name)
+            DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
             """,
-            (name, schema.to_aware_utc(when) if when else None),
+            (name, ts),
         )
 
 

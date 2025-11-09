@@ -328,20 +328,38 @@ def run(limit: int = 10, grace_minutes: int = 30) -> None:
         snapshot = _parse_trading_get_item(resp)
 
         # If Trading explicitly says code=1505, delete the row
-        if isinstance(snapshot, dict) and snapshot.get("code") == 1505 or snapshot.get("code") == 21920397 :
-            logger.info(
-                "[close.ended] Trading 1505/21920397 (Item Not Found) — deleting auction_id=%s item_id=%s",
-                auction_id,
-                item_id,
-            )
-            try:
-                with get_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("DELETE FROM auction_listings WHERE id = %s", (auction_id,))
-                    conn.commit()
-            except Exception as e:
-                logger.warning("[close.ended] failed to delete 1505/21920397 auction_id=%s: %s", auction_id, e)
-            continue
+        # If Trading explicitly says Item Not Found (1505 / 21920397), delete the row
+        if isinstance(snapshot, dict):
+            code = str(snapshot.get("code")) if snapshot.get("code") is not None else None
+            if code in ("1505", "21920397"):
+                logger.info(
+                    "[close.ended] Trading %s (Item Not Found) — deleting auction_id=%s item_id=%s",
+                    code,
+                    auction_id,
+                    item_id,
+                )
+                try:
+                    with get_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("DELETE FROM auction_listings WHERE id = %s", (auction_id,))
+                        conn.commit()
+                except Exception as e:
+                    logger.warning(
+                        "[close.ended] failed to delete 1505/21920397 auction_id=%s: %s",
+                        auction_id,
+                        e,
+                    )
+                continue
+            else:
+                # Unexpected dict shape – treat as parse failure and skip
+                logger.error(
+                    "[close.ended] unexpected dict snapshot for auction_id=%s external_id=%s item_id=%s: %r",
+                    auction_id,
+                    external_id,
+                    item_id,
+                    snapshot,
+                )
+                continue
 
         if snapshot is None:
             logger.error(

@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import Optional
 
 from .bikes import bike_model_key
-from .consoles_and_games import console_or_game_model_key
+from .consoles import console_or_game_model_key
+from .cameras import camera_drone_model_key
+from .watches import watch_model_key
 
 
 def normalise_model(title: str) -> Optional[str]:
@@ -16,15 +18,25 @@ def normalise_model(title: str) -> Optional[str]:
     """
     t = title.lower()
 
-    # 1) Bikes (we consider this "done" and don't want to break it)
-    bike_key = bike_model_key(t)
-    if bike_key:
-        return bike_key
+    # 1) Bikes
+    key = bike_model_key(t)
+    if key:
+        return key
 
-    # 2) Consoles / games / accessories / retro / PC
-    cg_key = console_or_game_model_key(t)
-    if cg_key:
-        return cg_key
+    # 2) Consoles
+    key = console_or_game_model_key(t)
+    if key:
+        return key
+
+    # 3) Cameras
+    key = camera_drone_model_key(t)
+    if key:
+        return key
+
+    # 4) Watches
+    key = watch_model_key(t)
+    if key:
+        return key
 
     # 3) Unknown – caller can map None -> "unknown" if needed
     return None

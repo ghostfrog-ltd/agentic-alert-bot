@@ -463,6 +463,9 @@ class EbayAdapterBase:
 
     def _normalize_item(self, raw: dict[str, Any], sale_type: str):
 
+        #logger.info("[%s] Looking at item ID=%r with title: %r",
+        #            self.DOMAIN, raw.get("itemId"), raw.get("title"))
+
         # HARD GATE: skip multi-variation / configurable-style listings entirely
         if is_configurable_item(raw):
             logger.info(
@@ -476,8 +479,8 @@ class EbayAdapterBase:
         item_id = raw.get("itemId")
 
         # Skip any legacy or malformed external_id (v1-prefixed junk)
-        if isinstance(item_id, str) and "v1" in item_id.lower():
-            return None
+        #if isinstance(item_id, str) and "v1" in item_id.lower():
+        #    return None
 
         title = raw.get("title") or ""
         buying_opts = raw.get("buyingOptions") or []
@@ -497,7 +500,6 @@ class EbayAdapterBase:
             return None
 
         title_lower = title.lower()
-        category_hint = self.categorize_title(title_lower)
         model_key = self._model_key_for(title)
 
         price_current_int = None
@@ -519,7 +521,7 @@ class EbayAdapterBase:
             "sale_type": sale_type,
             "roi_estimate": None,
             "max_bid": None,
-            "notes": category_hint,
+            "notes": '',
             "source_id": self._source_id,
             "model_key": model_key,
             "time_left_s": time_left_s,

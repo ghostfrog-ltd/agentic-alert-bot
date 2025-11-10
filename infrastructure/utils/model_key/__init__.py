@@ -6,7 +6,8 @@ from .bikes import bike_model_key
 from .consoles import console_or_game_model_key
 from .cameras import camera_drone_model_key
 from .watches import watch_model_key
-
+from .apple import apple_model_key
+from .tools import tools_model_key
 
 def normalise_model(title: str) -> Optional[str]:
     """
@@ -23,20 +24,30 @@ def normalise_model(title: str) -> Optional[str]:
     if key:
         return key
 
-    # 2) Consoles
-    key = console_or_game_model_key(t)
+    # 2) Apple
+    key = apple_model_key(t)
     if key:
         return key
 
-    # 3) Cameras
-    key = camera_drone_model_key(t)
-    if key:
-        return key
-
-    # 4) Watches
+    # 3) Watches
     key = watch_model_key(t)
     if key:
         return key
 
-    # 3) Unknown – caller can map None -> "unknown" if needed
+    # 4) Consoles
+    key = console_or_game_model_key(t)
+    if key:
+        return key
+
+    # 5) Cameras
+    key = camera_drone_model_key(t)
+    if key:
+        return key
+
+    # 6) Tools
+    key = tools_model_key(t)
+    if key:
+        return key
+
+    # Unknown
     return None

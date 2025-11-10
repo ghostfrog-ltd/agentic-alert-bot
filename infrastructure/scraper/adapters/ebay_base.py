@@ -199,6 +199,15 @@ class EbayAdapterBase:
             return None
         return mk
 
+    def _is_relevant(self, row: dict[str, Any]) -> bool:
+        """
+        Hook for per-adapter filtering on the *normalised* row.
+
+        Default: keep everything. Adapters (like ebay-apple) can override this
+        to drop non-relevant listings without touching the base pipeline.
+        """
+        return True
+
     # ------------------------------------------------------------------
     # DB flushing
     # ------------------------------------------------------------------
@@ -574,6 +583,10 @@ class EbayAdapterBase:
                         )
                         continue
 
+                    # NEW: per-adapter relevance filter
+                    if not self._is_relevant(row):
+                        continue
+
                     self._batch_buffer.append(row)
                     if row["price_current"]:
                         self._ph_buffer.append(ph)
@@ -604,6 +617,11 @@ class EbayAdapterBase:
                     if not norm:
                         continue
                     row, ph = norm
+
+                    # NEW: per-adapter relevance filter
+                    if not self._is_relevant(row):
+                        continue
+
                     self._batch_buffer.append(row)
                     if row["price_current"]:
                         self._ph_buffer.append(ph)

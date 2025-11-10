@@ -176,7 +176,7 @@ def _classify_non_console_game_or_accessory(text: str) -> Optional[str]:
     for key, pat in RETRO_COMPUTERS:
         if re.search(pat, text) and has_game_word:
             return f"{key}_game"
-
+    '''
     # PC-ish games (Steam / Origin keys etc.)
     if has_game_word and re.search(PC_WORDS, text):
         return "pc_game"
@@ -188,6 +188,7 @@ def _classify_non_console_game_or_accessory(text: str) -> Optional[str]:
     # Gaming accessories with no explicit console platform.
     if re.search(ACCESSORY, text):
         return "generic_accessory"
+    '''
 
     return None
 

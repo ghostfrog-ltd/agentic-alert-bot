@@ -4,6 +4,7 @@ import os, time, random, threading
 from time import perf_counter
 from dotenv import load_dotenv
 from infrastructure.utils.logger import get_logger
+from agent.reminders import check_and_send_reem_reminders
 
 load_dotenv()
 
@@ -104,6 +105,12 @@ def tick():
 
     start_wall = perf_counter()
     logger.info("\n\n==================== 🫀 HEARTBEAT START ====================\n")
+
+    try:
+        check_and_send_reem_reminders()
+    except Exception as e:
+        logger.exception("[Reem] reminder check failed: %s", e)
+
 
     # -------------------------------------------------
     # take snapshot of feature toggles for THIS run

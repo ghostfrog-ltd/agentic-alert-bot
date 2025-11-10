@@ -9,6 +9,8 @@ from infrastructure.scraper.adapters.niche.ebay.consoles import Adapter as Conso
 from infrastructure.scraper.adapters.niche.ebay.retro_pc import Adapter as RetroPcAdapter
 from infrastructure.scraper.adapters.niche.ebay.actioncams import Adapter as ActionCamAdapter
 from infrastructure.scraper.adapters.niche.ebay.watches import Adapter as WatchAdapter
+from infrastructure.scraper.adapters.niche.ebay.apple import Adapter as AppleAdapter
+from infrastructure.scraper.adapters.niche.ebay.tools import Adapter as ToolAdapter
 
 logger = get_logger(__name__)
 
@@ -79,11 +81,13 @@ def run(*, ebay_token: str):
     logger.info("[scrape] Begin scrape (API mode)")
 
     adapters = [
+        AppleAdapter(),
         MotoMineAdapter(),
         ConsolesAdapter(),
         RetroPcAdapter(),
         ActionCamAdapter(),
         WatchAdapter(),
+        ToolAdapter(),
     ]
 
     for adapter in adapters:

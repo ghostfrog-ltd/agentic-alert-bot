@@ -145,10 +145,12 @@ def camera_drone_model_key(text: str) -> Optional[str]:
     if not brand:
         return None
 
+    '''
     if _is_droneish(text):
         return f"drone_{brand}_generic"
 
     if _is_camerish(text):
         return f"cam_{brand}_generic"
+    '''
 
     return None

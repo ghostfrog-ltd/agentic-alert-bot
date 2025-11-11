@@ -8,7 +8,7 @@ class Adapter(EbayAdapterBase):
     # consoles / accessories / games (your list)
     CATEGORY_IDS = [139971, 54968, 139973]
 
-    SALE_TYPE = ["auction"]
+    SALE_TYPE = ["bin", "auction"]
 
     def _is_relevant(self, row: dict[str, Any]) -> bool:
         t = (row.get("title") or "").lower()

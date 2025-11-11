@@ -13,7 +13,7 @@ class Adapter(EbayAdapterBase):
         15032,   # iPods & MP3 players / some Apple audio
     ]
 
-    SALE_TYPE = ["auction"]
+    SALE_TYPE = ["bin", "auction"]
 
     def _is_relevant(self, row: dict[str, Any]) -> bool:
         """

@@ -17,7 +17,7 @@ connection = db_connection.connection
 # ---------------------------------
 # Default logical window; can be overridden at runtime via GF_COMPS_WINDOW_DAYS
 COMPS_WINDOW_DAYS: int = 30          # how many days of history to aggregate
-COMPS_MIN_INTERVAL_HOURS: int = 24   # minimum time between full recomputes
+COMPS_MIN_INTERVAL_HOURS: int = 6   # minimum time between full recomputes
 COMPS_KEEP_PER_KEY: int = 60         # how many snapshots per model_key to retain
 NO_KEY_BUCKET: str = "no_key"        # synthetic key for rows with model_key IS NULL
 

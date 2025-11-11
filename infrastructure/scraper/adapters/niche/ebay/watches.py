@@ -9,7 +9,7 @@ class Adapter(EbayAdapterBase):
         31387,  # Wristwatches
     ]
 
-    SALE_TYPE = ["auction"]
+    SALE_TYPE = ["bin", "auction"]
 
     def _is_relevant(self, row: dict[str, Any]) -> bool:
         t = (row.get("title") or "").lower()

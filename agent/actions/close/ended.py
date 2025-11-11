@@ -282,7 +282,7 @@ def _apply_updates(updates: List[Tuple[int, Optional[float], int]]) -> None:
         conn.commit()
 
 
-def run(limit: int = 10, grace_minutes: int = 30) -> None:
+def run(limit: int = 50, grace_minutes: int = 30) -> None:
     logger.info("[close.ended] run(limit=%d, grace_minutes=%d) starting", limit, grace_minutes)
 
     rows = _load_candidates(limit=limit, grace_minutes=grace_minutes)

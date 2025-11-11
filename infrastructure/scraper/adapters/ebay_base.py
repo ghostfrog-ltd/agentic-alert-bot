@@ -472,8 +472,8 @@ class EbayAdapterBase:
 
     def _normalize_item(self, raw: dict[str, Any], sale_type: str):
 
-        #logger.info("[%s] Looking at item ID=%r with title: %r",
-        #            self.DOMAIN, raw.get("itemId"), raw.get("title"))
+        # logger.info("[%s] Looking at item ID=%r with title: %r",
+        #             self.DOMAIN, raw.get("itemId"), raw.get("title"))
 
         # HARD GATE: skip multi-variation / configurable-style listings entirely
         if is_configurable_item(raw):
@@ -487,20 +487,28 @@ class EbayAdapterBase:
 
         item_id = raw.get("itemId")
 
-        # Skip any legacy or malformed external_id (v1-prefixed junk)
-        #if isinstance(item_id, str) and "v1" in item_id.lower():
-        #    return None
-
         title = raw.get("title") or ""
         buying_opts = raw.get("buyingOptions") or []
         seller_info = raw.get("seller") or {}
         seller_username = seller_info.get("username")
+
+        # Prices from eBay payload
         price_info = raw.get("price") or {}
-        price_value = price_info.get("value")
+        bid_info = raw.get("currentBidPrice") or {}
+
+        price_value = price_info.get("value")          # BIN / listing / start price
+        bid_value = bid_info.get("value")              # current auction bid (if any)
+
         web_url = raw.get("itemWebUrl") or raw.get("itemUrl") or ""
         end_time = _parse_iso_utc(raw.get("itemEndDate"))
         time_left_s = _secs_left(end_time)
-        bids_count = 0
+
+        # bids_count from API if present
+        raw_bids = raw.get("bidCount")
+        try:
+            bids_count = int(raw_bids) if raw_bids is not None else 0
+        except Exception:
+            bids_count = 0
 
         # sanity: drop mismatched type
         if sale_type == "bin" and ("AUCTION" in buying_opts):
@@ -511,18 +519,36 @@ class EbayAdapterBase:
         title_lower = title.lower()
         model_key = self._model_key_for(title)
 
-        price_current_int = None
-        if price_value is not None:
+        def _to_int(val) -> Optional[int]:
+            if val is None:
+                return None
             try:
-                price_current_int = int(round(float(str(price_value))))
+                return int(round(float(str(val))))
             except Exception:
-                price_current_int = None
+                return None
+
+        # Work out current price + bid price as ints
+        price_bid_current_int: Optional[int] = None
+        price_current_int: Optional[int] = None
+
+        if sale_type == "auction":
+            # For auctions, we care about the live bid if it exists
+            price_bid_current_int = _to_int(bid_value)
+            if price_bid_current_int is not None:
+                price_current_int = price_bid_current_int
+            else:
+                # fall back to price.value (start price) if no bids yet
+                price_current_int = _to_int(price_value)
+        else:
+            # BIN listings: just use the BIN/listing price
+            price_current_int = _to_int(price_value)
 
         row = {
             "source": self._source_name,
             "external_id": item_id,
             "title": title[:255],
-            "price_current": price_current_int or 0,
+            "price_current": price_current_int or 0,          # "current price at fetch time"
+            "price_bid_current": price_bid_current_int,       # NEW: live bid (auctions)
             "bids_count": bids_count,
             "end_time": end_time,
             "url": web_url[:1024],

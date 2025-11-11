@@ -8,6 +8,10 @@ from infrastructure.db.schema import get_connection
 from infrastructure.utils.logger import get_logger
 from infrastructure.utils.emailer import send_email  # ⬅️ reuse this
 
+from infrastructure.utils.telegram import send_telegram_message
+
+
+
 logger = get_logger(__name__)
 LONDON_TZ = ZoneInfo("Europe/London")
 
@@ -111,6 +115,11 @@ DAILY PLAN (reminder every email)
             is_html=False,  # plain text is fine; flip to True if you fancy HTML later
         )
         logger.info("[REEM] Email sent to %s: %s", TO_EMAIL, subject)
+
+        send_telegram_message(f"📣 {subject}\n\n{body_text}")
+
+        logger.info("[REEM] Telegram sent to %s: %s", TO_EMAIL, subject)
+
     except Exception as e:
         logger.exception("[REEM] Failed to send Operation Reem email: %s", e)
 

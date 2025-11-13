@@ -12,6 +12,8 @@ from psycopg2.extras import execute_values
 
 from infrastructure.utils.logger import get_logger
 from infrastructure.db.schema import connection, ensure_utc_session
+from datetime import timedelta
+from infrastructure.utils.timez import now_utc
 
 logger = get_logger(__name__)
 
@@ -231,6 +233,9 @@ class Adapter:
         items = _fetch_seller_items(domain, max_pages=self.max_pages, delay=self.delay)
         logger.info(f"[{domain}] Scraped {len(items)} listings via HTML")
 
+        scrape_ts = now_utc()
+        default_duration = timedelta(days=7)
+
         if not items:
             return
 
@@ -243,7 +248,7 @@ class Adapter:
                     "title": it["title"],
                     "price_current": it["price_value"],
                     "bids_count": None,
-                    "end_time": None,
+                    "end_time": scrape_ts + default_duration,
                     "url": it["url"],
                     "detail_url": it["url"],
                     "sale_type": "auction",

@@ -23,8 +23,6 @@ from infrastructure.utils.usage_tracker import increment_api_usage
 
 logger = get_logger(__name__)
 
-connection = get_connection()
-
 # -----------------
 # Constants / defaults
 # -----------------
@@ -69,13 +67,7 @@ def _iso_z(dt: datetime) -> str:
 def is_configurable_item(raw: dict[str, Any]) -> bool:
     """
     Detect multi-variation / configurable-style listings so we can skip them entirely.
-
-    Handles both:
-    - Legacy/Finding style: isMultiVariationListing
-    - Browse API style: itemGroupType == 'SELLER_DEFINED_VARIATIONS'
-    - Fallback: presence of variation-ish blocks
     """
-    # Finding API style: {"isMultiVariationListing": "true"} or ["true"] or {"__value__": "true"}
     val = raw.get("isMultiVariationListing")
     if val is not None:
         if isinstance(val, (list, tuple)):
@@ -89,14 +81,12 @@ def is_configurable_item(raw: dict[str, Any]) -> bool:
         elif isinstance(val, str) and val.lower() == "true":
             return True
 
-    # Browse API style group listings
     group_type = raw.get("itemGroupType")
     if isinstance(group_type, str):
         gt = group_type.strip().upper()
         if gt in {"SELLER_DEFINED_VARIATIONS", "GROUP", "MULTI_SKU"}:
             return True
 
-    # Very defensive fallback
     if "variations" in raw or "variation" in raw:
         return True
 
@@ -158,7 +148,9 @@ class EbayAdapterBase:
             sname = resolve_source_field(self.DOMAIN, "name", use_domain=False)
             if sname:
                 sid = resolve_source_id(self.DOMAIN, use_domain=False)
-                logger.info(f"[{self.DOMAIN}] sources resolved by name -> name='{sname}', id={sid}")
+                logger.info(
+                    f"[{self.DOMAIN}] sources resolved by name -> name='{sname}', id={sid}"
+                )
                 return (str(sname), int(sid) if sid is not None else None)
         except Exception:
             pass
@@ -200,12 +192,6 @@ class EbayAdapterBase:
         return mk
 
     def _is_relevant(self, row: dict[str, Any]) -> bool:
-        """
-        Hook for per-adapter filtering on the *normalised* row.
-
-        Default: keep everything. Adapters (like ebay-apple) can override this
-        to drop non-relevant listings without touching the base pipeline.
-        """
         return True
 
     # ------------------------------------------------------------------
@@ -352,25 +338,17 @@ class EbayAdapterBase:
             sale_type: str | None = None,
             limit: int = 50,
     ) -> list[dict[str, Any]]:
-        """
-        Fetch ONLY items from a specific seller using the Browse API.
-        - Uses filter=sellers:{username} (correct filter)
-        - Bounds by itemEndDate window to avoid 12023 "too large" errors
-        - Includes a tiny q='a' solely to satisfy Browse's required primary param
-        """
         base = os.getenv("EBAY_API_BASE", "").rstrip("/")
         if not base:
             logger.error(f"[{self.DOMAIN}] EBAY_API_BASE missing in env")
             return []
 
-        # Map "bin"/"auction" to Browse API buyingOptions
         buying_opt = None
         if sale_type == "bin":
             buying_opt = "FIXED_PRICE"
         elif sale_type == "auction":
             buying_opt = "AUCTION"
 
-        # Try wider window first, then tighten if eBay complains
         window_days_options = [60, 14, 7]
 
         all_items: list[dict[str, Any]] = []
@@ -394,8 +372,8 @@ class EbayAdapterBase:
 
             while True:
                 qs = [
-                    f"q={DEFAULT_Q}",  # required by Browse; filters do the real work
-                    f"filter={filter_param}",  # seller + window + (optional) buyingOptions
+                    f"q={DEFAULT_Q}",
+                    f"filter={filter_param}",
                     f"limit={limit}",
                     f"offset={offset}",
                     "sort=endingSoon",
@@ -418,11 +396,10 @@ class EbayAdapterBase:
                     logger.warning(
                         f"[{self.DOMAIN}] API seller={seller_username} status {r.status_code}: {r.text[:200]}"
                     )
-                    # If "too large", break to next (tighter) window; otherwise bail
                     if r.status_code == 400 and ("too large" in txt or "too many" in txt):
                         break
                     else:
-                        return all_items  # return what we have so far (likely empty)
+                        return all_items
                 increment_api_usage("ebay")
 
                 try:
@@ -435,7 +412,6 @@ class EbayAdapterBase:
                 if not isinstance(items, list) or not items:
                     break
 
-                # de-dupe across pages
                 new_batch = []
                 for it in items:
                     iid = it.get("itemId")
@@ -464,7 +440,6 @@ class EbayAdapterBase:
                 offset += limit
                 time.sleep(0.25)
 
-            # if we fetched anything in this window, stop tightening
             if all_items:
                 break
 
@@ -472,10 +447,6 @@ class EbayAdapterBase:
 
     def _normalize_item(self, raw: dict[str, Any], sale_type: str):
 
-        # logger.info("[%s] Looking at item ID=%r with title: %r",
-        #             self.DOMAIN, raw.get("itemId"), raw.get("title"))
-
-        # HARD GATE: skip multi-variation / configurable-style listings entirely
         if is_configurable_item(raw):
             logger.info(
                 "[%s] skipping configurable/multi-variation listing itemId=%s title=%r",
@@ -492,25 +463,22 @@ class EbayAdapterBase:
         seller_info = raw.get("seller") or {}
         seller_username = seller_info.get("username")
 
-        # Prices from eBay payload
         price_info = raw.get("price") or {}
         bid_info = raw.get("currentBidPrice") or {}
 
-        price_value = price_info.get("value")          # BIN / listing / start price
-        bid_value = bid_info.get("value")              # current auction bid (if any)
+        price_value = price_info.get("value")
+        bid_value = bid_info.get("value")
 
         web_url = raw.get("itemWebUrl") or raw.get("itemUrl") or ""
         end_time = _parse_iso_utc(raw.get("itemEndDate"))
         time_left_s = _secs_left(end_time)
 
-        # bids_count from API if present
         raw_bids = raw.get("bidCount")
         try:
             bids_count = int(raw_bids) if raw_bids is not None else 0
         except Exception:
             bids_count = 0
 
-        # sanity: drop mismatched type
         if sale_type == "bin" and ("AUCTION" in buying_opts):
             return None
         if sale_type == "auction" and "AUCTION" not in buying_opts:
@@ -527,28 +495,24 @@ class EbayAdapterBase:
             except Exception:
                 return None
 
-        # Work out current price + bid price as ints
         price_bid_current_int: Optional[int] = None
         price_current_int: Optional[int] = None
 
         if sale_type == "auction":
-            # For auctions, we care about the live bid if it exists
             price_bid_current_int = _to_int(bid_value)
             if price_bid_current_int is not None:
                 price_current_int = price_bid_current_int
             else:
-                # fall back to price.value (start price) if no bids yet
                 price_current_int = _to_int(price_value)
         else:
-            # BIN listings: just use the BIN/listing price
             price_current_int = _to_int(price_value)
 
         row = {
             "source": self._source_name,
             "external_id": item_id,
             "title": title[:255],
-            "price_current": price_current_int or 0,          # "current price at fetch time"
-            "price_bid_current": price_bid_current_int,       # NEW: live bid (auctions)
+            "price_current": price_current_int or 0,
+            "price_bid_current": price_bid_current_int,
             "bids_count": bids_count,
             "end_time": end_time,
             "url": web_url[:1024],
@@ -575,9 +539,7 @@ class EbayAdapterBase:
             self.SALE_TYPE if isinstance(self.SALE_TYPE, (list, tuple)) else [self.SALE_TYPE]
         )
 
-        # -------------------------
         # SELLER MODE
-        # -------------------------
         if self.FETCH_MODE == "seller":
             seller = self.SELLER_USERNAME
             if not seller:
@@ -597,7 +559,6 @@ class EbayAdapterBase:
                         continue
                     row, ph = norm
 
-                    # HARD GATE: only keep exact seller match
                     if row["seller_username"].lower().strip() != seller.lower().strip():
                         logger.debug(
                             "[%s] skipping foreign seller '%s' (wanted '%s') itemId=%s title=%r",
@@ -609,7 +570,6 @@ class EbayAdapterBase:
                         )
                         continue
 
-                    # NEW: per-adapter relevance filter
                     if not self._is_relevant(row):
                         continue
 
@@ -626,9 +586,7 @@ class EbayAdapterBase:
             self.flush_batch()
             return
 
-        # -------------------------
         # CATEGORY MODE
-        # -------------------------
         for cat_id in self.CATEGORY_IDS:
             for sale_type in sale_types:
                 items = self._fetch_category_items(ebay_token, cat_id, sale_type)
@@ -644,7 +602,6 @@ class EbayAdapterBase:
                         continue
                     row, ph = norm
 
-                    # NEW: per-adapter relevance filter
                     if not self._is_relevant(row):
                         continue
 
@@ -678,7 +635,7 @@ def bulk_append_price_history(rows: list[tuple[str, int, int]]):
         VALUES %s
         ON CONFLICT DO NOTHING
     """
-    conn = connection
+    conn = get_connection()  # Always get a live connection
     with conn, conn.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("SET LOCAL synchronous_commit TO OFF;")
@@ -723,7 +680,7 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
             status        = COALESCE(EXCLUDED.status,        auction_listings.status)
     """
-    conn = connection
+    conn = get_connection()  # Always get a live connection
     with conn, conn.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("SET LOCAL synchronous_commit TO OFF;")

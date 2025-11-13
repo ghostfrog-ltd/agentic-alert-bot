@@ -145,3 +145,10 @@ Add eBay Partner Network affiliate tags to links in messages.
 **Next step:** implement `user_prefs` table + basic Telegram commands.
 
 ---
+
+
+
+Channel names:
+GhostFrog eBay,
+GhostFrog eBay Pro
+GhostFrog eBay Elite

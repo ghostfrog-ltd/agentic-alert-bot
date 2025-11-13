@@ -4,6 +4,7 @@
 #from agent.reminders.reem import send_reem_test_email
 #send_reem_test_email()
 
+'''
 
 from dotenv import load_dotenv
 
@@ -15,3 +16,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+'''
+
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+from infrastructure.adapters.telegram import TelegramAdapter
+
+adapter = TelegramAdapter.from_env()
+
+chan_id = int(os.getenv("TELEGRAM_FIREHOSE_CHANNEL_ID"))
+adapter.send_message("🔥 GhostFrog eBay Firehose test alert!", chat_id=chan_id)

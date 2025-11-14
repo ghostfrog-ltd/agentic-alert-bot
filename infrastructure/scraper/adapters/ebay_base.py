@@ -654,6 +654,14 @@ def bulk_upsert_auction_listings(rows: list[dict]):
     """
     if not rows:
         return
+
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+
+    for r in rows:
+        # If end_time is missing → fabricate 1 day future end
+        if not r.get("end_time"):
+            r["end_time"] = now + timedelta(days=1)
+
     cols = [
         "source", "external_id", "title", "price_current", "bids_count", "end_time",
         "url", "detail_url", "sale_type", "roi_estimate", "max_bid", "notes",

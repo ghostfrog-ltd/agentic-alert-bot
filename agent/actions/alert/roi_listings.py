@@ -19,19 +19,20 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
-
 from psycopg2.extras import RealDictCursor
-
 from infrastructure.utils.logger import get_logger
+from infrastructure.adapters.telegram import TelegramAdapter
+from agent.actions.telegram.roi_summary import build_roi_message
+import os
 
 logger = get_logger(__name__)
 
 # --------------------------------
 # Tunable thresholds / assumptions
 # --------------------------------
-MIN_PROFIT_GBP: float = 50.0        # minimum £ profit you care about
-MIN_ROI: float = 0.25               # minimum ROI (0.25 = 25%)
-FEE_RATE: float = 0.13              # assumed selling fee rate on resale
+MIN_PROFIT_GBP: float = 50.0  # minimum £ profit you care about
+MIN_ROI: float = 0.25  # minimum ROI (0.25 = 25%)
+FEE_RATE: float = 0.13  # assumed selling fee rate on resale
 INBOUND_SHIP_DEFAULT_GBP: float = 0.0
 OUTBOUND_SHIP_DEFAULT_GBP: float = 7.0
 
@@ -53,12 +54,12 @@ PER_SOURCE: Dict[str, Dict[str, float]] = {
 BUCKET_STEP: float = 0.25  # 0.25 = 25% ROI per bucket
 
 # "NEW insane item" alert: first time we see something this good
-NEW_HIGH_ROI: float = 3.0            # 3.0 = 300% ROI
-NEW_HIGH_PROFIT_GBP: float = 100.0   # at least £100 profit
+NEW_HIGH_ROI: float = 3.0  # 3.0 = 300% ROI
+NEW_HIGH_PROFIT_GBP: float = 100.0  # at least £100 profit
 
 # Last-hour "spam me" window
 ENDGAME_WINDOW: timedelta = timedelta(hours=1)
-ENDGAME_MIN_ROI: float = 0.25        # only spam if still a decent deal
+ENDGAME_MIN_ROI: float = 0.25  # only spam if still a decent deal
 ENDGAME_MIN_PROFIT_GBP: float = 50.0
 
 # --------------------------------
@@ -67,10 +68,10 @@ ENDGAME_MIN_PROFIT_GBP: float = 50.0
 RECORD_ALERTS: bool = True
 SEND_EMAIL_DIGEST: bool = True
 
-ALERT_NAME: str = "roi_listings_digest"     # used in alert_state to track last-sent
+ALERT_NAME: str = "roi_listings_digest"  # used in alert_state to track last-sent
 TO_EMAIL: str = "info@ghostfrog.co.uk"
-MAX_EMAIL_ITEMS: int = 20                   # cap items in a single email
-EMAIL_COOLDOWN = timedelta(minutes=30)      # don't email more often than this
+MAX_EMAIL_ITEMS: int = 20  # cap items in a single email
+EMAIL_COOLDOWN = timedelta(minutes=30)  # don't email more often than this
 
 # --------------------------------
 # Investible model_key filters
@@ -78,11 +79,11 @@ EMAIL_COOLDOWN = timedelta(minutes=30)      # don't email more often than this
 # Only these shapes of model_key are allowed to drive ROI/comps/alerts.
 # Everything else (games, accessories, virtual items, noise) is ignored.
 INVESTIBLE_PREFIXES = (
-    "bike_",      # all bikes
+    "bike_",  # all bikes
 )
 
 INVESTIBLE_SUFFIXES = (
-    "_console",   # ps5_console, ps4_console, xbox_one_console, switch_console, etc.
+    "_console",  # ps5_console, ps4_console, xbox_one_console, switch_console, etc.
 )
 
 INVESTIBLE_EXACT = {
@@ -197,7 +198,7 @@ class Opportunity:
             f"[ROI] {self.title[:80]} "
             f"| buy £{self.purchase_cost:.2f} → sell £{self.comps_median:.2f} "
             f"| fees £{self.fees:.2f} | ship £{self.outbound_ship:.2f} "
-            f"| PROFIT £{self.profit:.2f} ({self.roi*100:.1f}% ROI) "
+            f"| PROFIT £{self.profit:.2f} ({self.roi * 100:.1f}% ROI) "
             f"| comps n={self.comps_samples} | {self.url}"
         )
 
@@ -227,12 +228,12 @@ def _source_cfg(source: Optional[str]) -> Tuple[float, float, float, float]:
 
 
 def _estimate_profit(
-    *,
-    ask_price: float,
-    comps_median: float,
-    fee_rate: float,
-    outbound_ship: float,
-    inbound_ship: float,
+        *,
+        ask_price: float,
+        comps_median: float,
+        fee_rate: float,
+        outbound_ship: float,
+        inbound_ship: float,
 ) -> Tuple[float, float, float]:
     """
     Estimate resale economics:
@@ -419,8 +420,34 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         f"(≥ £{MIN_PROFIT_GBP:.0f})"
     )
 
+    adapter: TelegramAdapter | None = None
+    firehose_chat_id: int | None = None
+
+    firehose_chat_raw = os.getenv("TELEGRAM_FIREHOSE_CHANNEL_ID")
+    if firehose_chat_raw:
+        try:
+            firehose_chat_id = int(firehose_chat_raw)
+            adapter = TelegramAdapter.from_env()
+        except Exception as e:
+            logger.warning(
+                "[roi_listings] Telegram firehose disabled (env issue): %s", e
+            )
+
     rows_html: List[str] = []
+
     for op in new_ops[:MAX_EMAIL_ITEMS]:
+        # Firehose Telegram per-op if adapter + chat_id are available
+        if adapter and firehose_chat_id is not None:
+            try:
+                msg = build_roi_message(op=op)
+                adapter.send_message(msg, chat_id=firehose_chat_id)
+            except Exception as e:
+                logger.warning(
+                    "[roi_listings] Telegram send failed for %s: %s",
+                    op.external_id,
+                    e,
+                )
+
         rows_html.append(
             (
                 '<p style="margin-bottom:12px;font-family:system-ui,Arial,sans-serif;'
@@ -431,7 +458,7 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
                 f'Buy £{op.purchase_cost:.2f} → Sell £{op.comps_median:.2f} '
                 f'| Fees £{op.fees:.2f} | Ship £{op.outbound_ship:.2f} '
                 f'| <strong>Profit £{op.profit:.2f}</strong> '
-                f'({op.roi*100:.0f}% ROI) '
+                f'({op.roi * 100:.0f}% ROI) '
                 f'| comps n={op.comps_samples}'
                 '</p>'
             )
@@ -444,12 +471,12 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         )
 
     body_html = (
-        '<div style="font-family:system-ui,Arial,sans-serif;'
-        'color:#111;font-size:14px;line-height:1.45;">'
-        '<h2 style="margin:0 0 16px;font-size:16px;line-height:1.3;">'
-        'High-ROI listings 🐸</h2>'
-        + "".join(rows_html) +
-        "</div>"
+            '<div style="font-family:system-ui,Arial,sans-serif;'
+            'color:#111;font-size:14px;line-height:1.45;">'
+            '<h2 style="margin:0 0 16px;font-size:16px;line-height:1.3;">'
+            'High-ROI listings 🐸</h2>'
+            + "".join(rows_html) +
+            "</div>"
     )
 
     try:
@@ -524,7 +551,7 @@ def _record_roi_snapshot(cur, op: Opportunity) -> None:
             op.external_id,
             op.source,
             op.model_key,
-            op.purchase_cost,   # purchase_cost includes inbound; you may swap to ask_price if desired
+            op.purchase_cost,  # purchase_cost includes inbound; you may swap to ask_price if desired
             op.roi,
             op.profit,
             _to_aware_utc(op.end_time) if op.end_time else None,
@@ -556,13 +583,13 @@ def _send_new_high_email(op: Opportunity, time_left_str: str) -> None:
     from infrastructure.utils.emailer import send_email  # local import
 
     subject = (
-        f"🔥 NEW {op.roi*100:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
+        f"🔥 NEW {op.roi * 100:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
     )
     body = (
         f"{op.title}\n\n"
         f"Source: {op.source}\n"
         f"URL: {op.url}\n\n"
-        f"ROI: {op.roi*100:.1f}%\n"
+        f"ROI: {op.roi * 100:.1f}%\n"
         f"Profit: £{op.profit:.2f}\n"
         f"Ends in: {time_left_str}\n"
     )
@@ -586,7 +613,7 @@ def _send_bucket_email(op: Opportunity, bucket: int, time_left_str: str) -> None
     )
     body = (
         f"{op.title}\n\n"
-        f"Bucket: {bucket} (step {BUCKET_STEP*100:.0f}%)\n"
+        f"Bucket: {bucket} (step {BUCKET_STEP * 100:.0f}%)\n"
         f"Source: {op.source}\n"
         f"URL: {op.url}\n\n"
         f"ROI: {roi_pct:.1f}%\n"
@@ -683,9 +710,9 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
                 # 3) Last-hour spam (no markers, intentionally noisy)
                 if end_time is not None:
                     if (
-                        end_time - now <= ENDGAME_WINDOW
-                        and op.profit >= ENDGAME_MIN_PROFIT_GBP
-                        and op.roi >= ENDGAME_MIN_ROI
+                            end_time - now <= ENDGAME_WINDOW
+                            and op.profit >= ENDGAME_MIN_PROFIT_GBP
+                            and op.roi >= ENDGAME_MIN_ROI
                     ):
                         _send_siren_email(op, time_left_str)
 
@@ -694,8 +721,8 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
 # Core shortlist logic
 # --------------------------------
 def _build_all_opps_for_roi(
-    listings: List[Dict[str, Any]],
-    comps_by_model: Dict[str, Dict[str, Any]],
+        listings: List[Dict[str, Any]],
+        comps_by_model: Dict[str, Dict[str, Any]],
 ) -> List[Opportunity]:
     """
     Build Opportunity objects for ROI/max_bid updates, without applying
@@ -765,8 +792,8 @@ def _build_all_opps_for_roi(
 
 
 def _shortlist(
-    listings: List[Dict[str, Any]],
-    comps_by_model: Dict[str, Dict[str, Any]],
+        listings: List[Dict[str, Any]],
+        comps_by_model: Dict[str, Dict[str, Any]],
 ) -> List[Opportunity]:
     """
     Same as _build_all_opps_for_roi, but applies MIN_PROFIT_GBP / MIN_ROI

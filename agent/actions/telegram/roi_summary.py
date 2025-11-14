@@ -27,19 +27,39 @@ def _format_time_left_s(time_left_s: int | None) -> str:
     return f"{hours}h {rem_mins}m"
 
 
-def build_roi_message(limit: int = 3) -> str:
+def build_roi_message(op: roi_listings.Opportunity | None = None, limit: int = 3) -> str:
     """
-    Use the existing ROI agent to compute opportunities, then format a
-    Telegram-friendly summary.
+    If `op` is supplied → return a single-item Telegram ROI alert message.
+    If `op` is None → behave like before:
+        - call roi_listings.run()
+        - return the top N opportunities formatted
 
-    This calls roi_listings.run(), so it will:
-      - recompute ROI for active listings
-      - update auction_listings
-      - record snapshots / alerts
-      - (maybe) send the existing email digest
+    This keeps backward compatibility with the /roi command AND lets the ROI
+    pipeline use this to send one clean message per opportunity.
     """
+    # -------------------------------
+    # SINGLE OP MODE
+    # -------------------------------
+    if op is not None:
+        roi_pct = op.roi * 100.0
+        time_left_str = _format_time_left_s(op.time_left_s)
+
+        lines = [
+            "🐸 ROI alert",
+            f"{op.title}",
+            "",
+            f"ROI: {roi_pct:.1f}% | Profit: £{op.profit:.2f}",
+            f"Buy £{op.purchase_cost:.2f} → Sell £{op.comps_median:.2f}",
+            f"Ends in: {time_left_str}",
+            f"{op.url}"
+        ]
+
+        return "\n".join(lines).strip()
+
+    # -------------------------------
+    # SUMMARY MODE (original behaviour)
+    # -------------------------------
     try:
-        # run() already returns a list[Opportunity] sorted by profit/ROI
         opps: List[roi_listings.Opportunity] = roi_listings.run(
             limit_output=limit
         )
@@ -55,8 +75,8 @@ def build_roi_message(limit: int = 3) -> str:
         )
 
     top = opps[:limit]
-
     lines: list[str] = []
+
     lines.append(
         f"📊 Top {len(top)} ROI opportunities "
         f"(≥ £{roi_listings.MIN_PROFIT_GBP:.0f}, "
@@ -74,6 +94,6 @@ def build_roi_message(limit: int = 3) -> str:
         )
         lines.append(f"   Ends in: {time_left_str}")
         lines.append(f"   {op.url}")
-        lines.append("")  # blank line between items
+        lines.append("")
 
     return "\n".join(lines).strip()

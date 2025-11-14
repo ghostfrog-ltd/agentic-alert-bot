@@ -21,6 +21,8 @@ from psycopg2.extras import RealDictCursor
 from infrastructure.db.schema import get_connection
 from infrastructure.utils.logger import get_logger
 from infrastructure.utils.emailer import send_email  # uses .env SMTP config
+from infrastructure.adapters.telegram import TelegramAdapter
+from agent.actions.telegram.hot_listings import build_hot_listings_message
 
 logger = get_logger(__name__)
 
@@ -191,7 +193,7 @@ def _fetch_listings_ending_soon(hours: int) -> list[dict]:
                   AND end_time IS NOT NULL
                   AND end_time <= NOW() + INTERVAL %s
                 """,
-                (f"{hours} hours",),
+                (f"{hours} hours}",),
             )
             return cur.fetchall()
 
@@ -308,9 +310,25 @@ def run() -> None:
     5) record_alert() (idempotent).
     6) If first time we've seen it and email budget allows,
        send email + mark_alert_emailed().
+       Regardless of email budget, also broadcast to Telegram firehose
+       (if TELEGRAM_FIREHOSE_CHANNEL_ID is configured).
     """
     # Make sure the alerts table is there (idempotent).
     create_alerts()
+
+    # --- Telegram firehose setup (optional) ---
+    adapter: TelegramAdapter | None = None
+    firehose_chat_id: int | None = None
+    firehose_raw = os.getenv("TELEGRAM_FIREHOSE_CHANNEL_ID")
+    if firehose_raw:
+        try:
+            firehose_chat_id = int(firehose_raw)
+            adapter = TelegramAdapter.from_env()
+        except Exception as e:
+            logger.warning(
+                "[hot_listings] Telegram firehose disabled (env issue): %s",
+                e,
+            )
 
     rows = _fetch_listings_ending_soon(WINDOW_HOURS)
     if not rows:
@@ -384,6 +402,18 @@ def run() -> None:
             time_left_s,
             r.get("url", ""),
         )
+
+        # --- Firehose broadcast for *new* steals (regardless of email cap) ---
+        if created_now and adapter and firehose_chat_id is not None:
+            try:
+                msg = build_hot_listings_message(row=r)
+                adapter.send_message(msg, chat_id=firehose_chat_id)
+            except Exception as e:
+                logger.warning(
+                    "[hot_listings][firehose] Telegram send failed for %s: %s",
+                    listing.external_id,
+                    e,
+                )
 
         # Only email the first time we see this steal.
         if created_now and alert_id:

@@ -1,106 +1,146 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
-
-# -------- shared TOOL helpers --------
-
-# Voltage / battery rating
-VOLTAGE = re.compile(r"\b(10\.8|12|14\.4|16|18|20|24|36|40|54)\s*v\b")
-
-# Tool type hints (useful to enrich the key)
-TOOL_TYPE = re.compile(
-    r"\b(drill|driver|impact\s*driver|impact\s*wrench|hammer\s*drill|sds|combi\s*drill|angle\s*grinder|grinder|circular\s*saw|jig\s*saw|recip\s*saw|multitool|multi\s*tool|nail\s*gun|nailer)\b",
-    flags=re.I,
-)
-
-# Model pattern – typical manufacturer codes like DHP458, DCF887, GSB 18V-55, etc.
-MODEL_CODE = re.compile(r"\b([A-Z]{2,4}\s*-?\s*\d{2,4}[A-Z]?)\b")
-
-# -------- brand-specific RULES --------
-# Simple direct brand triggers → brand base key
-
-_RULES_TOOLS: list[tuple[str, str]] = [
-    (r"\bmakita\b", "tools_makita"),
-    (r"\bdewalt\b", "tools_dewalt"),
-    (r"\bbosch\b", "tools_bosch"),
-    (r"\bmilwaukee\b", "tools_milwaukee"),
-    (r"\bryobi\b", "tools_ryobi"),
-    (r"\bhilti\b", "tools_hilti"),
-    (r"\bhitachi\b", "tools_hitachi"),
-    (r"\bmetabo\b", "tools_metabo"),
-    (r"\beinhell\b", "tools_einhell"),
-    (r"\bfestool\b", "tools_festool"),
-    (r"\bparkside\b", "tools_parkside"),
-]
+from typing import Mapping, Any, Optional
 
 
-# -------- enrichment helpers --------
+def _clean(s: Any) -> str:
+    if not s:
+        return ""
+    s = str(s).strip().upper()
+    return re.sub(r"[^A-Z0-9]", "", s)
 
-def _parse_voltage(text: str) -> Optional[str]:
-    m = VOLTAGE.search(text)
+
+def _extract_brand(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
+    # Prefer structured fields
+    for key in ("Brand", "Manufacturer", "Maker"):
+        b = _clean(attrs.get(key))
+        if b:
+            return b
+
+    # Fallback: sniff from title
+    if title:
+        t = title.upper()
+        for kb in [
+            "DEWALT", "MAKITA", "BOSCH", "MILWAUKEE", "RYOBI", "HILTI", "FESTOOL",
+            "HIKOKI", "METABO", "AEG", "BLACK+DECKER", "BLACK & DECKER",
+            "PARKSIDE", "WORX", "EINHELL", "MAC ALLISTER", "STANLEY"
+        ]:
+            if kb in t:
+                return _clean(kb)
+
+    return None
+
+
+def _extract_action(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
+    # Prefer structured action / type
+    for key in ("Action", "Tool Type", "Type"):
+        a = _clean(attrs.get(key))
+        if a:
+            return a
+
+    # Fallback: infer from title with common patterns
+    if title:
+        t = title.upper()
+        patterns = {
+            "COMBI": "COMBIDRILL",
+            "HAMMER": "HAMMERDRILL",
+            "IMPACT": "IMPACTDRIVER",
+            "SDS": "SDSPLUS",
+            "CIRCULAR": "CIRCULARSAW",
+            "JIGSAW": "JIGSAW",
+            "RECIP": "RECIPSAW",
+            "GRINDER": "ANGLEGRINDER",
+            "MULTI": "MULTITOOL",
+            "ROUTER": "ROUTER",
+            "PLANER": "PLANER",
+            "MITRE": "MITRE",
+        }
+        for needle, out in patterns.items():
+            if needle in t:
+                return out
+
+    return None
+
+
+def _extract_power(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
+    power_fields = [
+        "Power", "Voltage", "Volts", "Wattage", "W", "V"
+    ]
+
+    # Prefer structured power info
+    for key in power_fields:
+        v = attrs.get(key)
+        if v:
+            return _normalise_power(str(v))
+
+    # Fallback from title
+    if title:
+        t = title.upper()
+
+        # 18V, 20V, 230V, etc
+        m = re.search(r"\b(\d+)\s*V\b", t)
+        if m:
+            return f"{m.group(1)}V"
+
+        # 710W, 1200W, etc
+        m = re.search(r"\b(\d+)\s*W\b", t)
+        if m:
+            return f"{m.group(1)}W"
+
+    return None
+
+
+def _normalise_power(raw: str) -> Optional[str]:
+    raw = raw.upper()
+
+    # extract number + V/W
+    m = re.search(r"(\d+)\s*(V|W)", raw)
     if not m:
         return None
-    return f"{m.group(1).replace('.', '_')}v"
+    num, unit = m.group(1), m.group(2)
+    return f"{num}{unit}"
 
 
-def _parse_tool_type(text: str) -> Optional[str]:
-    m = TOOL_TYPE.search(text)
-    if not m:
-        return None
-    return m.group(1).replace(" ", "_").lower()
+def _extract_model(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
+    for key in ("Model", "MPN", "Manufacturer Part Number", "PartNumber", "Part Number"):
+        v = _clean(attrs.get(key))
+        if v and v not in {"NONE", "NA", "DOESNOTAPPLY"}:
+            return v
+
+    # Fallback: scrape model-like token from title (optional)
+    if title:
+        t = title.upper()
+        m = re.findall(r"\b[A-Z0-9]{3,}\b", t)
+        # Only return a model if it's code-like
+        for tok in m:
+            if any(c.isdigit() for c in tok):
+                return _clean(tok)
+
+    return None
 
 
-def _parse_model_code(text: str) -> Optional[str]:
-    m = MODEL_CODE.search(text)
-    if not m:
-        return None
-    return m.group(1).replace(" ", "").replace("-", "").upper()
-
-
-def _refine_tool_key(base_key: str, text: str) -> str:
+def tools_model_key(
+    attrs: Mapping[str, Any],
+    title: Optional[str] = None,
+) -> Optional[str]:
     """
-    Example: tools_makita → tools_makita_DHP458_18v_drill
+    Build a canonical key for tools:
+      ACTION-POWER-BRAND[-MODEL]
     """
-    t = text.lower()
-    parts = [base_key]
 
-    model = _parse_model_code(text)
+    action = _extract_action(attrs, title)
+    power = _extract_power(attrs, title)
+    brand = _extract_brand(attrs, title)
+    model = _extract_model(attrs, title)
+
+    if not action or not power or not brand:
+        return None  # missing fundamentals
+
+    key = f"{action}-{power}-{brand}"
+
+    # model optional
     if model:
-        parts.append(model)
+        key += f"-{model}"
 
-    volt = _parse_voltage(t)
-    if volt:
-        parts.append(volt)
-
-    ttype = _parse_tool_type(t)
-    if ttype:
-        parts.append(ttype)
-
-    return "_".join(parts)
-
-
-def _guess_tool_base_from_title(text: str) -> Optional[str]:
-    t = text.lower()
-    for pat, base in _RULES_TOOLS:
-        if re.search(pat, t):
-            return base
-    return None
-
-
-def tools_model_key(text: str) -> Optional[str]:
-    """
-    Tool-specific model classifier.
-    Returns tools_* key or None.
-    """
-    # 1) Brand-specific hits first
-    for pat, key in _RULES_TOOLS:
-        if re.search(pat, text):
-            return _refine_tool_key(key, text)
-
-    # 2) Fallback: unknown brand but toolish text
-    base = "tools_generic"
-    if TOOL_TYPE.search(text) or VOLTAGE.search(text):
-        return _refine_tool_key(base, text)
-
-    return None
+    return key

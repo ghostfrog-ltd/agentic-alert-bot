@@ -180,6 +180,7 @@ class EbayAdapterBase:
             return "modern"
         return "unknown"
 
+    '''
     def _model_key_for(self, title: str) -> Optional[str]:
         try:
             mk = normalise_model(title)
@@ -190,6 +191,10 @@ class EbayAdapterBase:
         if not mk or (isinstance(mk, str) and not mk.strip()):
             return None
         return mk
+    '''
+
+    def _model_key_for(self, title: str) -> Optional[str]:
+        return None
 
     def _is_relevant(self, row: dict[str, Any]) -> bool:
         return True

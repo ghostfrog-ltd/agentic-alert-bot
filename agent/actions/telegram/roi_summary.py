@@ -27,18 +27,22 @@ def _format_time_left_s(time_left_s: int | None) -> str:
     return f"{hours}h {rem_mins}m"
 
 
-def build_roi_message(op: roi_listings.Opportunity | None = None, limit: int = 3) -> str:
+def build_roi_message(
+    op: roi_listings.Opportunity | None = None,
+    limit: int = 3,
+) -> str:
     """
     If `op` is supplied → return a single-item Telegram ROI alert message.
-    If `op` is None → behave like before:
-        - call roi_listings.run()
+    If `op` is None → summary mode for the /roi command:
+
+        - call roi_listings.get_top_roi_opportunities(limit)
         - return the top N opportunities formatted
 
-    This keeps backward compatibility with the /roi command AND lets the ROI
-    pipeline use this to send one clean message per opportunity.
+    This keeps backward compatibility with the ROI pipeline (which calls this
+    with `op=` for firehose messages) and makes the /roi command read-only.
     """
     # -------------------------------
-    # SINGLE OP MODE
+    # SINGLE OP MODE (pipeline firehose)
     # -------------------------------
     if op is not None:
         roi_pct = op.roi * 100.0
@@ -51,20 +55,20 @@ def build_roi_message(op: roi_listings.Opportunity | None = None, limit: int = 3
             f"ROI: {roi_pct:.1f}% | Profit: £{op.profit:.2f}",
             f"Buy £{op.purchase_cost:.2f} → Sell £{op.comps_median:.2f}",
             f"Ends in: {time_left_str}",
-            f"{op.url}"
+            f"{op.url}",
         ]
 
         return "\n".join(lines).strip()
 
     # -------------------------------
-    # SUMMARY MODE (original behaviour)
+    # SUMMARY MODE (/roi command)
     # -------------------------------
     try:
-        opps: List[roi_listings.Opportunity] = roi_listings.run(
-            limit_output=limit
+        opps: List[roi_listings.Opportunity] = roi_listings.get_top_roi_opportunities(
+            limit=limit
         )
     except Exception:
-        logger.exception("[Telegram /roi] roi_listings.run() failed")
+        logger.exception("[Telegram /roi] get_top_roi_opportunities() failed")
         return "⚠️ Could not fetch ROI listings (agent error)."
 
     if not opps:

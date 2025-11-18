@@ -19,7 +19,9 @@ from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone, timedelta
+
 from psycopg2.extras import RealDictCursor
+
 from infrastructure.utils.logger import get_logger
 from infrastructure.adapters.telegram import TelegramAdapter
 from agent.actions.telegram.roi_summary import build_roi_message
@@ -74,64 +76,47 @@ MAX_EMAIL_ITEMS: int = 20  # cap items in a single email
 EMAIL_COOLDOWN = timedelta(minutes=30)  # don't email more often than this
 
 # --------------------------------
-# Investible model_key filters
+# TEMP safety: accessory-ish titles
 # --------------------------------
-# Only these shapes of model_key are allowed to drive ROI/comps/alerts.
-# Everything else (games, accessories, virtual items, noise) is ignored.
-INVESTIBLE_PREFIXES = (
-    "bike_",  # all bikes
+# Keeping this for later if you want to re-enable, but we no longer use it
+# to block ROI. Everything is investible now; UNKNOWN is the only hard block.
+ACCESSORY_TITLE_KEYWORDS = (
+    "cable",
+    "charging cable",
+    "charge cable",
+    "usb cable",
+    "power cable",
+    "power lead",
+    "lead",
+    "charger",
+    "charging dock",
+    "charging station",
+    "dock",
+    "stand",
+    "skin",
+    "cover",
+    "shell",
+    "faceplate",
+    "case",
+    "grip",
 )
-
-INVESTIBLE_SUFFIXES = (
-    "_console",  # ps5_console, ps4_console, xbox_one_console, switch_console, etc.
-)
-
-INVESTIBLE_EXACT = {
-    # specific exceptions we *do* want to track
-    # "neo_geo_cd_console",
-    # "pc_engine_console",
-}
-
-# Explicitly banned model keys that produce junk ROI
-NON_INVESTIBLE_EXACT = {
-    "generic_retro_console",  # all the £10 4K HDMI sticks etc.
-}
 
 
 def _is_investible_model_key(model_key: Optional[str]) -> bool:
     """
-    Decide whether this model_key is allowed to participate in ROI.
+    Simplified: treat any non-empty, non-UNKNOWN model_key as investible.
 
-    - bikes are always investible
-    - console hardware (ends with *_console)
-    - any special whitelisted exact keys
-    - anything in NON_INVESTIBLE_EXACT is *never* investible
+    UNKNOWN is our quarantine bucket; nothing with that key should ever get ROI.
     """
     if not model_key:
         return False
-
-    mk = model_key.lower().strip()
+    mk = str(model_key).strip()
     if not mk:
         return False
-
-    # Hard exclusion
-    if mk in NON_INVESTIBLE_EXACT:
+    # Hard block: UNKNOWN should never get comps/ROI
+    if mk.upper() == "unknown":
         return False
-
-    # Bikes always investible
-    if mk.startswith(INVESTIBLE_PREFIXES):
-        return True
-
-    # Console hardware: ps5_console, switch_console, etc.
-    if any(mk.endswith(suffix) for suffix in INVESTIBLE_SUFFIXES):
-        return True
-
-    # Explicit whitelisted console keys
-    if mk in INVESTIBLE_EXACT:
-        return True
-
-    # Everything else: games, accessories, unknowns, etc.
-    return False
+    return True
 
 
 # --------------------------------
@@ -228,12 +213,12 @@ def _source_cfg(source: Optional[str]) -> Tuple[float, float, float, float]:
 
 
 def _estimate_profit(
-        *,
-        ask_price: float,
-        comps_median: float,
-        fee_rate: float,
-        outbound_ship: float,
-        inbound_ship: float,
+    *,
+    ask_price: float,
+    comps_median: float,
+    fee_rate: float,
+    outbound_ship: float,
+    inbound_ship: float,
 ) -> Tuple[float, float, float]:
     """
     Estimate resale economics:
@@ -291,7 +276,8 @@ def latest_comps_map() -> Dict[str, Dict[str, Any]]:
     conn = schema.get_connection()
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         schema.ensure_utc_session(cur)
-        cur.execute("""
+        cur.execute(
+            """
             WITH lc AS (
               SELECT DISTINCT ON (model_key)
                      model_key, median_final_price, mean_final_price, samples, computed_at
@@ -299,7 +285,8 @@ def latest_comps_map() -> Dict[str, Dict[str, Any]]:
               ORDER BY model_key, computed_at DESC
             )
             SELECT * FROM lc
-        """)
+        """
+        )
         rows = cur.fetchall()
         return {r["model_key"]: r for r in rows}
 
@@ -325,10 +312,16 @@ def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, 
         ALTER TABLE alerts
         ADD CONSTRAINT alerts_external_id_key UNIQUE (external_id);
     """
+
+    logger.info(
+        "[roi_listings.record_alert] ext=%s score=%.2f max_bid=%.2f",
+        external_id, score, max_bid,
+    )
+
     from infrastructure.db import schema
 
     conn = schema.get_connection()
-    with conn:
+    try:
         with conn.cursor() as cur:
             schema.ensure_utc_session(cur)
             cur.execute(
@@ -344,6 +337,10 @@ def record_alert(external_id: str, score: float, max_bid: float) -> tuple[bool, 
                 (external_id, score, max_bid),
             )
             row = cur.fetchone()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     if not row:
         return False, None
@@ -396,17 +393,22 @@ def set_alert_last_sent(name: str, when: Optional[datetime] = None) -> None:
     # If caller didn't pass a time, use "now" in UTC.
     ts = _to_aware_utc(when) if when is not None else _now_utc()
 
-    with conn, conn.cursor() as cur:
-        schema.ensure_utc_session(cur)
-        cur.execute(
-            """
-            INSERT INTO alert_state (name, last_sent_at)
-            VALUES (%s, %s)
-            ON CONFLICT (name)
-            DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
-            """,
-            (name, ts),
-        )
+    try:
+        with conn.cursor() as cur:
+            schema.ensure_utc_session(cur)
+            cur.execute(
+                """
+                INSERT INTO alert_state (name, last_sent_at)
+                VALUES (%s, %s)
+                ON CONFLICT (name)
+                DO UPDATE SET last_sent_at = EXCLUDED.last_sent_at
+                """,
+                (name, ts),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _send_email_digest(new_ops: List[Opportunity]) -> None:
@@ -471,12 +473,12 @@ def _send_email_digest(new_ops: List[Opportunity]) -> None:
         )
 
     body_html = (
-            '<div style="font-family:system-ui,Arial,sans-serif;'
-            'color:#111;font-size:14px;line-height:1.45;">'
-            '<h2 style="margin:0 0 16px;font-size:16px;line-height:1.3;">'
-            'High-ROI listings 🐸</h2>'
-            + "".join(rows_html) +
-            "</div>"
+        '<div style="font-family:system-ui,Arial,sans-serif;'
+        'color:#111;font-size:14px;line-height:1.45;">'
+        '<h2 style="margin:0 0 16px;font-size:16px;line-height:1.3;">'
+        'High-ROI listings 🐸</h2>'
+        + "".join(rows_html)
+        + "</div>"
     )
 
     try:
@@ -582,9 +584,7 @@ def _insert_marker(cur, external_id: str, marker: str) -> None:
 def _send_new_high_email(op: Opportunity, time_left_str: str) -> None:
     from infrastructure.utils.emailer import send_email  # local import
 
-    subject = (
-        f"🔥 NEW {op.roi * 100:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
-    )
+    subject = f"🔥 NEW {op.roi * 100:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
     body = (
         f"{op.title}\n\n"
         f"Source: {op.source}\n"
@@ -608,9 +608,7 @@ def _send_bucket_email(op: Opportunity, bucket: int, time_left_str: str) -> None
     from infrastructure.utils.emailer import send_email  # local import
 
     roi_pct = op.roi * 100.0
-    subject = (
-        f"📈 ROI milestone {roi_pct:.0f}% (£{op.profit:.0f}) – {op.title[:80]}"
-    )
+    subject = f"📈 ROI milestone {roi_pct:.0f}% (£{op.profit:.0f}) – {op.title[:80]}"
     body = (
         f"{op.title}\n\n"
         f"Bucket: {bucket} (step {BUCKET_STEP * 100:.0f}%)\n"
@@ -623,7 +621,9 @@ def _send_bucket_email(op: Opportunity, bucket: int, time_left_str: str) -> None
     try:
         send_email(subject=subject, body=body, to_addr=TO_EMAIL, is_html=False)
         logger.info(
-            "[roi_listings][bucket] emailed bucket_%d for %s", bucket, op.external_id
+            "[roi_listings][bucket] emailed bucket_%d for %s",
+            bucket,
+            op.external_id,
         )
     except Exception as e:
         logger.warning("[roi_listings][bucket] email failed: %s", e)
@@ -673,7 +673,7 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
     conn = schema.get_connection()
     now = _now_utc()
 
-    with conn:
+    try:
         with conn.cursor() as cur:
             schema.ensure_utc_session(cur)
             _ensure_support_tables(cur)
@@ -710,19 +710,27 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
                 # 3) Last-hour spam (no markers, intentionally noisy)
                 if end_time is not None:
                     if (
-                            end_time - now <= ENDGAME_WINDOW
-                            and op.profit >= ENDGAME_MIN_PROFIT_GBP
-                            and op.roi >= ENDGAME_MIN_ROI
+                        end_time - now <= ENDGAME_WINDOW
+                        and op.profit >= ENDGAME_MIN_PROFIT_GBP
+                        and op.roi >= ENDGAME_MIN_ROI
                     ):
                         _send_siren_email(op, time_left_str)
+
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        logger.warning("[roi_listings] _process_roi_alerts failed: %s", e)
 
 
 # --------------------------------
 # Core shortlist logic
 # --------------------------------
 def _build_all_opps_for_roi(
-        listings: List[Dict[str, Any]],
-        comps_by_model: Dict[str, Dict[str, Any]],
+    listings: List[Dict[str, Any]],
+    comps_by_model: Dict[str, Dict[str, Any]],
 ) -> List[Opportunity]:
     """
     Build Opportunity objects for ROI/max_bid updates, without applying
@@ -740,11 +748,7 @@ def _build_all_opps_for_roi(
         end_time = li.get("end_time")
         time_left_s = li.get("time_left_s")
 
-        # Must have a model_key
-        if not model_key:
-            continue
-
-        # Must be an investible category (bikes, consoles, etc.)
+        # Must have a usable, non-UNKNOWN model_key
         if not _is_investible_model_key(model_key):
             continue
 
@@ -792,8 +796,8 @@ def _build_all_opps_for_roi(
 
 
 def _shortlist(
-        listings: List[Dict[str, Any]],
-        comps_by_model: Dict[str, Dict[str, Any]],
+    listings: List[Dict[str, Any]],
+    comps_by_model: Dict[str, Dict[str, Any]],
 ) -> List[Opportunity]:
     """
     Same as _build_all_opps_for_roi, but applies MIN_PROFIT_GBP / MIN_ROI
@@ -811,11 +815,7 @@ def _shortlist(
         end_time = li.get("end_time")
         time_left_s = li.get("time_left_s")
 
-        # Must have a model_key
-        if not model_key:
-            continue
-
-        # Must be an investible category
+        # Must have a usable, non-UNKNOWN model_key
         if not _is_investible_model_key(model_key):
             continue
 
@@ -897,9 +897,9 @@ def _update_roi_estimates(opps: List[Opportunity]) -> None:
             "falling back to simple max_bid heuristic (0.8 * comps_median)"
         )
 
+    conn = schema.get_connection()
     try:
-        conn = schema.get_connection()
-        with conn, conn.cursor() as cur:
+        with conn.cursor() as cur:
             schema.ensure_utc_session(cur)
             rows = []
             for op in opps:
@@ -918,18 +918,45 @@ def _update_roi_estimates(opps: List[Opportunity]) -> None:
                 "WHERE external_id = %s",
                 rows,
             )
+        conn.commit()
 
         logger.info(
             "[roi_listings] updated roi_estimate + max_bid for %d listings",
             len(opps),
         )
     except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.warning("[roi_listings] failed to update roi_estimate/max_bid: %s", e)
 
 
 # --------------------------------
-# Public entry point
+# Public entry points
 # --------------------------------
+def get_top_roi_opportunities(limit: int = 20) -> List[Opportunity]:
+    """
+    Lightweight, read-only helper for consumers (e.g. Telegram /roi)
+    to fetch the top-N ROI opportunities *without* triggering the full
+    ROI pipeline (DB writes, emails, markers, etc).
+
+    It reuses the same shortlist logic as run(), but only returns data.
+    """
+    try:
+        listings = _fetch_active_listings()
+    except Exception as e:
+        logger.error(
+            "[roi_listings] fetch active listings failed in get_top_roi_opportunities: %s",
+            e,
+        )
+        return []
+
+    comps_by_model = _comps_lookup()
+    opps = _shortlist(listings, comps_by_model)
+    return opps[:limit]
+
+
 def run(limit_output: int = 20) -> List[Opportunity]:
     """
     Main entry point:

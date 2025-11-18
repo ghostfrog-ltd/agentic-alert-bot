@@ -4,9 +4,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List
 
-from psycopg2.extras import RealDictCursor
-
-from infrastructure.db.schema import get_connection
 from infrastructure.utils.logger import get_logger
 from agent.actions.alert import hot_listings as hot  # reuse config + helpers
 
@@ -53,45 +50,6 @@ def _format_time_left(time_left_s: int | None, end_time) -> str:
         return "unknown"
 
 
-def _fetch_top_hot_alerts(limit: int) -> List[dict]:
-    """
-    Read top hot alerts from DB (alerts + auction_listings).
-    We assume agent.actions.alert.hot_listings.run() is what populates alerts.
-    """
-    conn = get_connection()
-    with conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # reuse their UTC helper if you like:
-            hot.ensure_utc_session(cur)  # type: ignore[attr-defined]
-
-            cur.execute(
-                """
-                SELECT
-                    a.external_id,
-                    a.score,
-                    a.max_bid,
-                    a.created_at,
-                    al.title,
-                    al.url,
-                    al.price_current,
-                    al.model_key,
-                    al.end_time,
-                    al.bids_count,
-                    al.time_left_s
-                FROM alerts a
-                JOIN auction_listings al
-                  ON al.external_id = a.external_id
-                WHERE a.score IS NOT NULL
-                ORDER BY a.score DESC, a.created_at DESC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cur.fetchall()
-
-    return list(rows)
-
-
 def _format_row_for_telegram(r: dict, idx: int = 1) -> list[str]:
     """
     Format a single hot alert row into Telegram-friendly lines.
@@ -131,15 +89,16 @@ def build_hot_listings_message(
 
     Two modes:
 
+      - Firehose / single-row mode:
+          build_hot_listings_message(row=<alert_row_dict>)
+        → formats a single listing into a short message. The row is
+          passed in from agent.actions.alert.hot_listings.run() when a
+          new alert is created.
+
       - Command mode (/hot):
           build_hot_listings_message(limit=3)
-        → reads top N from alerts + auction_listings and formats them.
-
-      - Firehose mode (per new alert):
-          build_hot_listings_message(row=<alert_row_dict>)
-        → formats a single listing into a short message.
-
-    In firehose mode, we ignore `limit` and only format the supplied row.
+        → asks the alert.hot_listings module for the top-N alerts
+          (already scored & stored in alerts table) and formats them.
     """
     # Firehose / single-row mode
     if row is not None:
@@ -151,9 +110,9 @@ def build_hot_listings_message(
         lines.extend(_format_row_for_telegram(row, idx=1))
         return "\n".join(lines).strip()
 
-    # Default: command mode, use DB top-N
+    # Command mode: top-N from alerts via alert hot_listings helper
     try:
-        rows = _fetch_top_hot_alerts(limit)
+        rows: List[dict] = hot.get_top_hot_alert_rows(limit)
     except Exception:
         logger.exception("[Telegram /hot] failed to fetch hot alerts")
         return "⚠️ Could not fetch hot listings (DB error)."

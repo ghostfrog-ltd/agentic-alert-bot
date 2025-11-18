@@ -13,8 +13,14 @@ logger = get_logger(__name__)
 
 def reset_db_and_get_count() -> int:
     """
-    Run the SQL reset sequence and return the number of rows
-    that were in auction_listings before the reset.
+    Hard reset of model_key + comps + alert/ROI tables.
+
+    - Count auction_listings
+    - Null all model_key values
+    - Drop & recreate comps (no legacy rows or indexes)
+    - Truncate alerts / alert_state
+    - Truncate ROI tables if present
+    - Drop & recreate latest_comps matview
     """
     conn = get_connection()
 
@@ -30,31 +36,51 @@ def reset_db_and_get_count() -> int:
             logger.info("[reset] Nulling auction_listings.model_key ...")
             cur.execute("UPDATE auction_listings SET model_key = NULL;")
 
-            # 3) Clear downstream tables
-            logger.info("[reset] Truncating comps, alerts, alert_state, roi_snapshots, roi_alert_markers ...")
-            cur.execute("TRUNCATE TABLE comps;")
+            # 3) Drop & recreate comps so absolutely nothing survives
+            logger.info("[reset] Dropping comps table ...")
+            cur.execute("DROP TABLE IF EXISTS comps CASCADE;")
+
+            logger.info("[reset] Recreating comps table ...")
+            cur.execute(
+                """
+                CREATE TABLE comps (
+                    model_key          text PRIMARY KEY,
+                    median_final_price numeric,
+                    mean_final_price   numeric,
+                    samples            integer,
+                    computed_at        timestamp with time zone
+                );
+                """
+            )
+
+            # 4) Clear downstream tables that depend on comps/model_key
+            logger.info("[reset] Truncating alerts and alert_state ...")
             cur.execute("TRUNCATE TABLE alerts;")
             cur.execute("TRUNCATE TABLE alert_state;")
 
             # Truncate ROI-related tables if they exist
-            cur.execute("""
-            DO $$
-            BEGIN
-                IF to_regclass('public.roi_snapshots') IS NOT NULL THEN
-                    EXECUTE 'TRUNCATE TABLE roi_snapshots;';
-                END IF;
-                IF to_regclass('public.roi_alert_markers') IS NOT NULL THEN
-                    EXECUTE 'TRUNCATE TABLE roi_alert_markers;';
-                END IF;
-            END$$;
-            """)
+            logger.info("[reset] Truncating ROI tables (if they exist) ...")
+            cur.execute(
+                """
+                DO $$
+                BEGIN
+                    IF to_regclass('public.roi_snapshots') IS NOT NULL THEN
+                        EXECUTE 'TRUNCATE TABLE roi_snapshots;';
+                    END IF;
+                    IF to_regclass('public.roi_alert_markers') IS NOT NULL THEN
+                        EXECUTE 'TRUNCATE TABLE roi_alert_markers;';
+                    END IF;
+                END$$;
+                """
+            )
 
-            # 4) Recreate latest_comps materialized view
+            # 5) Drop & recreate latest_comps materialized view
             logger.info("[reset] Dropping latest_comps materialized view (if exists) ...")
             cur.execute("DROP MATERIALIZED VIEW IF EXISTS latest_comps;")
 
             logger.info("[reset] Creating latest_comps materialized view ...")
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE MATERIALIZED VIEW latest_comps AS
                 SELECT DISTINCT ON (model_key)
                        model_key,
@@ -64,10 +90,10 @@ def reset_db_and_get_count() -> int:
                        computed_at
                   FROM comps
                  ORDER BY model_key, computed_at DESC;
-            """)
+                """
+            )
 
-            # 5) Refresh (empty at this stage)
-            logger.info("[reset] Refreshing latest_comps (will be empty for now) ...")
+            logger.info("[reset] Refreshing latest_comps (empty at this stage) ...")
             cur.execute("REFRESH MATERIALIZED VIEW latest_comps;")
 
             logger.info("[reset] DB reset sequence completed.")
@@ -79,6 +105,7 @@ def main() -> None:
     logger.info("[reset] Calling rebuild_model_keys(%s) ...", count)
 
     model_keys(count)
+
     logger.info("[reset] Running comps() ...")
     comps()
 

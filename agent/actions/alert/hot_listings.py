@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from agent.actions.alert.roi_listings import _is_investible_model_key
+from psycopg2.extras import RealDictCursor
+from infrastructure.db import schema
+
 """
 Scan live auction listings that end soon, score them against comps,
 record alerts idempotently, and email on first creation.
@@ -160,6 +164,74 @@ def _compose_email_body(
         f"Bids: {bids_count}\n"
     )
 
+def get_top_hot_alert_rows(limit: int) -> list[dict]:
+    """
+    Read-only helper for consumers (e.g. Telegram /hot) to fetch the
+    top-N scored alerts joined to auction_listings, without duplicating SQL.
+
+    - Only returns *live* auctions (status='live', time_left_s > 0).
+    - Re-applies `_is_investible_model_key` so old junk in `alerts`
+      (e.g. cables, random crap) doesn't show up.
+    """
+    # Slight over-fetch so filtering doesn't reduce us below `limit`
+    fetch_limit = max(limit * 3, limit)
+
+    conn = schema.get_fresh_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            ensure_utc_session(cur)
+            cur.execute(
+                """
+                SELECT
+                    a.external_id,
+                    a.score,
+                    a.max_bid,
+                    a.created_at,
+                    al.title,
+                    al.url,
+                    al.price_current,
+                    al.model_key,
+                    al.end_time,
+                    al.bids_count,
+                    al.time_left_s,
+                    al.status
+                FROM alerts a
+                JOIN auction_listings al
+                  ON al.external_id = a.external_id
+                WHERE a.score IS NOT NULL
+                  AND al.status = 'live'
+                  AND (al.time_left_s IS NULL OR al.time_left_s > 0)
+                ORDER BY a.score DESC, a.created_at DESC
+                LIMIT %s
+                """,
+                (fetch_limit,),
+            )
+            candidates = cur.fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    for r in candidates:
+        mk = r.get("model_key")
+        if not mk or not _is_investible_model_key(mk):
+            continue
+
+        ext_id = r["external_id"]
+        if ext_id in seen:
+            continue
+        seen.add(ext_id)
+
+        rows.append(r)
+        if len(rows) >= limit:
+            break
+
+    return rows
+
 
 def ensure_utc_session(cur) -> None:
     try:
@@ -193,7 +265,7 @@ def _fetch_listings_ending_soon(hours: int) -> list[dict]:
                   AND end_time IS NOT NULL
                   AND end_time <= NOW() + INTERVAL %s
                 """,
-                (f"{hours} hours}",),
+                (f"{hours} hours",),
             )
             return cur.fetchall()
 
@@ -344,6 +416,9 @@ def run() -> None:
         mk = r.get("model_key")
         if not mk:
             # listing doesn't have a normalised model_key yet -> can't price it
+            continue
+
+        if not _is_investible_model_key(mk):
             continue
 
         comp_row = get_latest_comp_for_model(mk)

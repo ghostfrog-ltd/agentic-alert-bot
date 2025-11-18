@@ -16,10 +16,8 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
 
-
-from dotenv import load_dotenv
+    from dotenv import load_dotenv
 load_dotenv()
 
 import os
@@ -29,3 +27,15 @@ adapter = TelegramAdapter.from_env()
 
 chan_id = int(os.getenv("TELEGRAM_FIREHOSE_CHANNEL_ID"))
 adapter.send_message("🔥 GhostFrog eBay Firehose test alert!", chat_id=chan_id)
+
+#from agent.actions.maintenance.attributes import run
+
+#run(limit=1)
+
+'''
+
+
+
+
+from agent.actions.maintenance.rebuild_model_keys import rebuild_model_keys as model_keys
+model_keys()

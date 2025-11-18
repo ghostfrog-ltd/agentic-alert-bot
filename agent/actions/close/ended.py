@@ -156,14 +156,14 @@ def _parse_trading_get_item(resp: requests.Response) -> Optional[TradingSnapshot
         return None
 
     listing_status = (
-        _xml_text(item_node, "./ns:ListingStatus", ns)
-        or _xml_text(item_node, "./ns:SellingStatus/ns:ListingStatus", ns)
-        or ""
+            _xml_text(item_node, "./ns:ListingStatus", ns)
+            or _xml_text(item_node, "./ns:SellingStatus/ns:ListingStatus", ns)
+            or ""
     ).lower()
 
     selling_state = (
-        _xml_text(item_node, "./ns:SellingStatus/ns:SellingState", ns)
-        or ""
+            _xml_text(item_node, "./ns:SellingStatus/ns:SellingState", ns)
+            or ""
     ).lower()
 
     bid_count_txt = _xml_text(item_node, "./ns:SellingStatus/ns:BidCount", ns)
@@ -201,10 +201,10 @@ def _parse_trading_get_item(resp: requests.Response) -> Optional[TradingSnapshot
     elif qty_sold > 0:
         sold_flag = True
     elif (
-        ("completed" in listing_status or "completed" in selling_state)
-        and bid_count > 0
-        and final_price is not None
-        and final_price > 0
+            ("completed" in listing_status or "completed" in selling_state)
+            and bid_count > 0
+            and final_price is not None
+            and final_price > 0
     ):
         sold_flag = True
 
@@ -368,6 +368,22 @@ def run(limit: int = 50, grace_minutes: int = 30) -> None:
                 external_id,
                 item_id,
             )
+
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+
+                    cur.execute(
+                        """
+                        UPDATE auction_listings
+                        SET
+                            status = 'parse_failed',
+                            finalized = TRUE   
+                        WHERE id = %s
+                        """,
+                        (auction_id,)
+                    )
+                    conn.commit()
+
             continue
 
         if not snapshot.ended:

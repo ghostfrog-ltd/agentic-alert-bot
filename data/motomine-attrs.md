@@ -1,0 +1,1192 @@
+=== Attribute values for source='motomine' ===
+
+================================================================================
+Capacity (cc) (121 unique)
+ - 0
+ - 1000
+ - 1002
+ - 1043
+ - 1050
+ - 1058
+ - 1077
+ - 1079
+ - 108
+ - 1084
+ - 1085
+ - 110
+ - 1100
+ - 1130
+ - 1133
+ - 1137
+ - 1158
+ - 1160
+ - 1170
+ - 1171
+ - 1179
+ - 1188
+ - 1199
+ - 1200
+ - 1215
+ - 1237
+ - 124
+ - 125
+ - 1250
+ - 1252
+ - 1254
+ - 1255
+ - 1261
+ - 1262
+ - 1301
+ - 1352
+ - 1450
+ - 1471
+ - 1500
+ - 1552
+ - 1584
+ - 1833
+ - 1854
+ - 2294
+ - 248
+ - 249
+ - 278
+ - 279
+ - 280
+ - 296
+ - 313
+ - 349
+ - 350
+ - 373
+ - 398
+ - 399
+ - 400
+ - 411
+ - 449
+ - 471
+ - 49
+ - 498
+ - 50
+ - 500
+ - 535
+ - 562
+ - 583
+ - 599
+ - 600
+ - 618
+ - 636
+ - 638
+ - 645
+ - 647
+ - 648
+ - 649
+ - 650
+ - 652
+ - 656
+ - 659
+ - 675
+ - 680
+ - 689
+ - 693
+ - 738
+ - 744
+ - 745
+ - 749
+ - 750
+ - 755
+ - 765
+ - 773
+ - 781
+ - 782
+ - 798
+ - 799
+ - 800
+ - 821
+ - 847
+ - 849
+ - 853
+ - 865
+ - 883
+ - 885
+ - 890
+ - 894
+ - 895
+ - 896
+ - 899
+ - 900
+ - 903
+ - 929
+ - 937
+ - 948
+ - 954
+ - 955
+ - 963
+ - 988
+ - 996
+ - 998
+ - 999
+
+================================================================================
+Colour (37 unique)
+ - BEIGE
+ - BLACK
+ - BLACK/GREY
+ - BLACK/RED
+ - BLACK/SILVER
+ - BLACK/WHITE
+ - BLACK/YELLOW
+ - BLUE
+ - BLUE/BLACK
+ - BLUE/WHITE
+ - BRONZE
+ - BROWN
+ - Blue
+ - GOLD
+ - GREEN
+ - GREEN/SILVER
+ - GREY
+ - GREY/BLACK
+ - GREY/BLUE
+ - GREY/RED
+ - GREY/YELLOW
+ - MULTI-COLOURED
+ - ORANGE
+ - ORANGE/WHITE
+ - PURPLE
+ - RED
+ - RED/SILVER
+ - RED/WHITE
+ - SILVER
+ - SILVER/BLUE
+ - SILVER/RED
+ - Silver
+ - WHITE
+ - WHITE/BLUE
+ - WHITE/GREY
+ - White
+ - YELLOW
+
+================================================================================
+Date of 1st Registration (3 unique)
+ - 20180301
+ - 20231123
+ - 20250319
+
+================================================================================
+Drive Type (3 unique)
+ - BELT
+ - CHAIN
+ - Chain
+
+================================================================================
+Engine Size (121 unique)
+ - 0
+ - 1000
+ - 1002
+ - 1043
+ - 1050
+ - 1058
+ - 1077
+ - 1079
+ - 108
+ - 1084
+ - 1085
+ - 110
+ - 1100
+ - 1130
+ - 1133
+ - 1137
+ - 1158
+ - 1160
+ - 1170
+ - 1171
+ - 1179
+ - 1188
+ - 1199
+ - 1200
+ - 1215
+ - 1237
+ - 124
+ - 125
+ - 1250
+ - 1252
+ - 1254
+ - 1255
+ - 1261
+ - 1262
+ - 1301
+ - 1352
+ - 1450
+ - 1471
+ - 1500
+ - 1552
+ - 1584
+ - 1833
+ - 1854
+ - 2294
+ - 248
+ - 249
+ - 278
+ - 279
+ - 280
+ - 296
+ - 313
+ - 349
+ - 350
+ - 373
+ - 398
+ - 399
+ - 400
+ - 411
+ - 449
+ - 471
+ - 49
+ - 498
+ - 50
+ - 500
+ - 535
+ - 562
+ - 583
+ - 599
+ - 600
+ - 618
+ - 636
+ - 638
+ - 645
+ - 647
+ - 648
+ - 649
+ - 650
+ - 652
+ - 656
+ - 659
+ - 675
+ - 680
+ - 689
+ - 693
+ - 738
+ - 744
+ - 745
+ - 749
+ - 750
+ - 755
+ - 765
+ - 773
+ - 781
+ - 782
+ - 798
+ - 799
+ - 800
+ - 821
+ - 847
+ - 849
+ - 853
+ - 865
+ - 883
+ - 885
+ - 890
+ - 894
+ - 895
+ - 896
+ - 899
+ - 900
+ - 903
+ - 929
+ - 937
+ - 948
+ - 954
+ - 955
+ - 963
+ - 988
+ - 996
+ - 998
+ - 999
+
+================================================================================
+Fuel (3 unique)
+ - ELECTRIC
+ - PETROL
+ - Petrol
+
+================================================================================
+MOT Expiration Date (1 unique)
+ - 2028
+
+================================================================================
+MOT Expiry Date (2 unique)
+ - 202605
+ - 202611
+
+================================================================================
+Manufacturer (47 unique)
+ - ACCESS
+ - APRILIA
+ - BENELLI
+ - BMW
+ - BSA
+ - BULLIT
+ - CFMOTO
+ - DUCATI
+ - GAS GAS
+ - HANWAY
+ - HARLEY-DAVIDSON
+ - HONDA
+ - HUSQVARNA
+ - HYOSUNG
+ - Honda
+ - Husqvarna
+ - INDIAN
+ - KAWASAKI
+ - KEEWAY
+ - KSR MOTO
+ - KTM
+ - KYMCO
+ - LEXMOTO
+ - MAEVING
+ - MGB
+ - MOTO GUZZI
+ - MOTO MORINI
+ - MUTT
+ - MV AGUSTA
+ - NECO
+ - PEUGEOT
+ - PIAGGIO
+ - ROYAL ALLOY
+ - ROYAL ENFIELD
+ - SCOMADI
+ - SINNIS
+ - SUNRA
+ - SUZUKI
+ - SYM
+ - TRIUMPH
+ - Triumph
+ - UM
+ - VICTORY
+ - VIJAY SOPER
+ - VOGE
+ - YAMAHA
+ - ZONTES
+
+================================================================================
+Mileage (3 unique)
+ - 1600
+ - 1850
+ - 9959
+
+================================================================================
+Model (401 unique)
+ - 0
+ - 1090 ADVENTURE 18
+ - 125 DUKE 18
+ - 125 DUKE 19
+ - 125 DUKE 21
+ - 125 DUKE 22
+ - 125 DUKE 23
+ - 1290 SUPERDUKE R 14
+ - 1290 SUPERDUKE R 17
+ - 390 ADVENTURE SW 23
+ - 450 EXC-R
+ - 502C CRUISER
+ - 600 M
+ - 790 DUKE 20
+ - 790 DUKE L 23
+ - 801 SVARTPILEN 2024
+ - 900 DSX
+ - AGILITY CITY 125 E5
+ - AKITA 125
+ - ALEX ONE
+ - AN 650 AK9
+ - AN 650 K3
+ - APACHE
+ - ASSAULT 125
+ - ASSAULT 125 HJ 125-J
+ - BN 125 A7F
+ - BN 125 E5
+ - BONNEVILLE
+ - BONNEVILLE 865
+ - BONNEVILLE AMERICA
+ - BONNEVILLE AMERICA 865
+ - BONNEVILLE BOBBER
+ - BONNEVILLE SPEEDMASTER
+ - BONNEVILLE STREET TWIN
+ - BONNEVILLE T100 BLACK
+ - BONNEVILLE T120 BLACK
+ - C 125 A-N
+ - C 400 X
+ - CB
+ - CB 1000 RA-B
+ - CB 1000 RA-L
+ - CB 500 F-A
+ - CB 500 FA-F
+ - CB 500 FA-H
+ - CB 500 FA-R
+ - CB 500 XA-E
+ - CB 600 F2-02
+ - CB 650 FA-G
+ - CB 650 RA-P
+ - CB 750 A-S
+ - CB400
+ - CBF 1000-8
+ - CBF 125 M-9
+ - CBF 125 M-B
+ - CBF 125 M-D
+ - CBF 125 NA-J
+ - CBF 600 SA-5
+ - CBR 1000 RA-J
+ - CBR 1000 RR-B
+ - CBR 1100 XX
+ - CBR 125 R-D
+ - CBR 125 RW-9
+ - CBR 250 RA-B
+ - CBR 500 RA-E
+ - CBR 500 RA-J
+ - CBR 500 RA-M
+ - CBR 600 F6
+ - CBR 600 R3-R
+ - CBR 600 RR-3
+ - CBR 600 RR-7
+ - CBR 600 RR-B
+ - CBR 900 RR
+ - CBR 900 RR-Y
+ - CBR 900RR-2
+ - CBR1100
+ - CBR600
+ - CFORCE 1000 TOURING OVERL
+ - CK1 125
+ - CL 125 T
+ - CLASSIC 350 E5
+ - CMX 1100 A2-P
+ - CMX 1100 D-N
+ - CMX 500 A-X
+ - CMX 500 A2-L
+ - CMX 500 A2-P
+ - CONTINENTAL GT
+ - CONTINENTAL GT 650 E5
+ - CRF 1000 D2-J
+ - DELIGHT 125 (LTS 125-C)
+ - DIABLO 50 LJ 50 QT-9M
+ - DL 1000 K8 GT
+ - DL 650 AK7 TOURING
+ - DL 650 AL4
+ - DL 650 AL6
+ - DL 650 AL9
+ - DL 650 X AL8
+ - DS900X
+ - ECHO
+ - ECHO PLUS 50 LJ 50 QT-6L
+ - EJ 800 ABF
+ - EJ 800 CKF CAFE
+ - EN 125
+ - EN 650 DKF
+ - EN 650 EJF
+ - EN 650 EKF
+ - EN 650 JNFAN
+ - EN 650 JPFAN
+ - ER 300 BGF ABS
+ - ER 650 A6S
+ - ER 650 HKF
+ - ER 650 SPFAN
+ - ER500-A3
+ - ES 700 23
+ - EX 650 EDS
+ - EX 650 SPFAN
+ - F 650 GS 04
+ - F 700 GS
+ - F 800 ST
+ - F 900 R SE
+ - F 900 XR
+ - F3 675
+ - F650GS
+ - FIDDLE 125 E5
+ - FJ 1200
+ - FXDC SUPERGLIDE CU 1584 0
+ - FXDL LOW RIDER
+ - FXST SOFTAIL STANDARD
+ - FZS 600
+ - G 310 GS
+ - G 310 R
+ - GL 1800 DA-J
+ - GLR 125 1WH-F
+ - GLR 125 1WH-H
+ - GOLD STAR
+ - GOLDWING
+ - GP150
+ - GPD125-A NMAX 125 ABS
+ - GRS 125
+ - GSF 1250 K8 STREET FIGHTE
+ - GSF 1250 SA K8
+ - GSF 1250 SA L0
+ - GSF 600S K2
+ - GSF 650 SA K9
+ - GSF650
+ - GSR 750 L1
+ - GSR 750 ZL4
+ - GSX 1250 FAL1
+ - GSX 650 FL0
+ - GSX R600X
+ - GSX-R1000 K2
+ - GSX-R600
+ - GSXR 1000 K5
+ - GSXR 1000 L5
+ - GSXR 125 RL M4
+ - GSXR 125 X AL8
+ - GSXR 600 K7
+ - GSXR 600 L1
+ - GSXR 750 K4
+ - GSXS 1000 AL6 ABS
+ - GSXS 1000 RQ M5
+ - GSXS 1000 TRQ M2
+ - GSXS 125 RLXM3
+ - GSXS 750 Z AL7
+ - GT 125 RC
+ - GT 125I
+ - GW 250 L3
+ - HAWK (2HP)
+ - HERO 125
+ - HIMALAYAN
+ - HYPERMOTARD 950
+ - INTERCEPTOR INT 650 E5
+ - IRON 883 XL N 13
+ - JET 14 125 E4
+ - JET 14 125 E4 LC
+ - JET X 125 E5
+ - K1200 RS
+ - KISBEE 50 4T
+ - KLE
+ - KLE 500 B6F
+ - KLE 650 A8F
+ - KLE 650 FKFA
+ - KLZ 1000 AEF
+ - KLZ 1000 EMFNN
+ - LEONCINO 125 E5
+ - LIBERTY 125
+ - LIBERTY 125 ABS
+ - LIBERTY 125 S ABS
+ - LIKE 125
+ - LS-Z 125 E55
+ - LXR SE 125 E55 TR125-2
+ - LXS 125
+ - LXS 125 E55
+ - M1100 E-A
+ - M620-02
+ - M821
+ - MASK 50
+ - MASK 50 E5
+ - METEOR 350 E5
+ - METROPOLIS 400 SW
+ - MICHIGAN 125
+ - MP3 300 YOURBAN LT
+ - MSX 125 A-R
+ - MT 125 (MTN 125-A)
+ - MT 125 ABS
+ - MT-07
+ - MT-07 ABS
+ - MT-09 ABS
+ - MT-09 SP
+ - MT-09 SP (MTN890D)
+ - MT-10 MTN1000
+ - MULTISTRADA 950
+ - MULTISTRADA V4S
+ - MW125 TRICITY 125
+ - NC 750 XA-E
+ - NC 750 XA-G
+ - NC 750 XA-K
+ - NC 750 XD-H
+ - NHT 125 E5
+ - NSC 110 E-E
+ - NSC 110 MPDH
+ - NSC 110 P
+ - NSS 125 AD-K
+ - NSS 300 A-K
+ - NT650V DEAUVILLE
+ - NT700V
+ - OCTANE
+ - ORBIT III 50 E5
+ - PEGASO 650
+ - PIAGGIO ONE
+ - R 1200 GS
+ - R 1200 R
+ - R 1200 RS
+ - R 1200 RT
+ - R 1250 GS ADVENTURE TE
+ - R 1250 GS EXCLUSIVE TE
+ - R NINET RACER S
+ - R SERIES
+ - R1100 R
+ - R1100 RT
+ - R1100 S
+ - R125 (YZF 125-A)
+ - R6
+ - R66S 125 E55
+ - RC 125 18
+ - RC 125 23
+ - RC 390
+ - RC 390 18
+ - RENEGADE COMMANDO 125
+ - RIALTO 50
+ - RK V125 C
+ - RKF 125 E5
+ - ROCKET 111 TOURING
+ - RS 660
+ - RS 660 E5+
+ - RS4 125
+ - S 1000 R
+ - S 1000 RR
+ - S 1000 XR
+ - SC 125 CLF
+ - SC 125 S E5
+ - SCOUT
+ - SCRAMBLER 125
+ - SCRAMBLER 400X
+ - SH 125 AD-E
+ - SH 125 AD2-N
+ - SH 125-8
+ - SHIVER 900
+ - SHUTTLE 125
+ - SL 750 SHIVER
+ - SPEED 400
+ - SPEED TRIPLE 1050
+ - SPEED TWIN 900
+ - SPEEDFIGHT 4 125 LC
+ - SPORTSTER S
+ - SPRINT GT 1050 ABS
+ - SR 125
+ - SR 125 DETROIT
+ - SR GT 125
+ - SR GT 125 SPORT
+ - SR MOTARD 125
+ - ST 1300 A-6
+ - STREET SCRAMBLER
+ - STREET TRIPLE
+ - STREET TRIPLE RS
+ - SUPER METEOR 650
+ - SUPERLIGHT
+ - SUPERLIGHT 125 E4
+ - SUPERLIGHT 125 E5
+ - SV 650 AL9
+ - SV 650S K2
+ - SVARTPILEN 125 2022
+ - SXR 50
+ - T 595 DAYTONA
+ - TEMPEST 125
+ - TENERE 700 RALLY (XZT690D
+ - TENERE 700 WORLD RAID XZT
+ - TERRAIN 125
+ - THRUXTON
+ - THUNDERBIRD SPORT
+ - TIGER 1200 RALLY PRO
+ - TIGER 800 ABS
+ - TIGER SPORT 1050
+ - TL 125
+ - TMAX TECH MAX (XP560D)
+ - TORNADO NAKED T 125 E5
+ - TRACER 700 (MTT 690-A)
+ - TRACER 700 MT-07 TRACER
+ - TRACER 9 GT (MTT 890D)
+ - TRACER 900 GT
+ - TRIESTE 50 E5
+ - TRK 502 X
+ - TROPHY SE
+ - TRX 850
+ - TUONO FIGHTER
+ - TUONO V4 1100 FACTORY
+ - TUONO V4 APRC ABS
+ - TURISMO VELOCE
+ - TWEET 125
+ - Thruxton
+ - UB 125 LNM M4
+ - V7 STONE
+ - V85 TT
+ - VENOM 125 SK 125-22
+ - VESPA ET4
+ - VESPA GTS 300 SUPER ABS
+ - VESPA GTS 300 SUPERTECH
+ - VESPA LX 125 3V
+ - VESPA PRIMAVERA 125 3V
+ - VESPA PRIMAVERA 125 ABS
+ - VESPA PRIMAVERA 50
+ - VESPA SPRINT 125 3V ABS
+ - VFR 1200 F-A
+ - VFR 1200 F-D
+ - VFR 1200 F-F
+ - VFR 1200 X-C
+ - VFR 800 X-F
+ - VFR 800-4
+ - VFR750F
+ - VFR800
+ - VFR800F
+ - VISAR 125
+ - VITPILEN
+ - VN 1600 D6F CLASSIC TOUR
+ - VN 900 BAF CLASSIC
+ - VN 900 BBFA CLASSIC
+ - VN 900 CAF CUSTOM
+ - VN1500-P1H
+ - VRSCA V-ROD
+ - VRSCAW V-ROD
+ - VRSCDX NIGHT ROD SPECIAL
+ - WR 125 R
+ - WR 125 X
+ - WW 125 A-M
+ - WW 125-A
+ - X DIAVEL S
+ - X-CAPE 650
+ - X-LIGHT 125 E5
+ - X-MAX 125 (YP125RA)
+ - X-MAX TECH MAX 125 (YP125
+ - XC 125 E VITY
+ - XEVO 125 SPORT
+ - XL 125 V-7
+ - XL 700 VA-8
+ - XL 700 VA-9
+ - XL 883 R SPORTSTER
+ - XL 883L SPORTSTER
+ - XSR 700 ABS
+ - XSR 900 (MTM890)
+ - XT 1200 Z SUPER TENERE
+ - XT 125 X
+ - XTZ750
+ - XV 1900 A
+ - YBR 125
+ - YBR 125 CUSTOM
+ - YN 50 NEO'S
+ - YZF 1000R
+ - YZF R1 05
+ - YZF R125
+ - YZF R6 04
+ - YZF R6 09
+ - YZF R6 R
+ - YZF R7 (YZF690)
+ - YZF-R1
+ - ZG 1400 CBF
+ - ZR 1000 A6F
+ - ZR 750 J1H
+ - ZR 900 CJF
+ - ZS 125-86 TERRAIN
+ - ZSB 125 EFI
+ - ZT 125-G1
+ - ZT 125-GK
+ - ZX 1000 D6F
+ - ZX 1000 GCF
+ - ZX 1002 BJF SX SE
+ - ZX 1002 KRFNN
+ - ZX 1400 D8F ABS
+ - ZX 600 RBF
+ - ZX 600-F3
+ - ZX 636 C6F
+ - ZX636 B1H
+ - ZX900-C2
+
+================================================================================
+Previous owners (excl. current) (2 unique)
+ - 0
+ - 1
+
+================================================================================
+Start Type (2 unique)
+ - ELECTRIC
+ - Electric start
+
+================================================================================
+Street Name (332 unique)
+ - 1090 ADVENTURE
+ - 125 DUKE
+ - 1290 SUPERDUKE R
+ - 390 ADVENTURE SW
+ - 450 EXC-R
+ - 502C CRUISER
+ - 790 DUKE
+ - 801 SVARTPILEN
+ - 900 DSX
+ - AGILITY CITY 125
+ - AKITA 125
+ - ALEX ONE 125
+ - APACHE 300
+ - ASSAULT 125
+ - BANDIT 1250
+ - BANDIT 1250 S
+ - BANDIT 600 S
+ - BANDIT 650
+ - BANDIT 650 S
+ - BN 125
+ - BONNEVILLE 865
+ - BONNEVILLE AMERICA 865
+ - BONNEVILLE BOBBER
+ - BONNEVILLE SPEEDMASTER
+ - BONNEVILLE STREET TWIN
+ - BONNEVILLE T100 BLACK
+ - BONNEVILLE T120 BLACK
+ - BURGMAN 125 STREET EX
+ - BURGMAN 650
+ - C 125 CUB
+ - C 400 X
+ - CB 1000 R
+ - CB 125 F
+ - CB 125 R
+ - CB 125R
+ - CB 500 F
+ - CB 500 FA-H
+ - CB 500 X
+ - CB 600 F HORNET S
+ - CB 650 F
+ - CB 650 RA-P
+ - CB 750 HORNET
+ - CB125F
+ - CB400
+ - CBF 1000
+ - CBF 125
+ - CBF 600
+ - CBR 1000 RR FIREBLADE
+ - CBR 1100 XX SUPER BLACKBIRD
+ - CBR 125 R
+ - CBR 250 R
+ - CBR 500 R
+ - CBR 500 RA-E
+ - CBR 600 F
+ - CBR 600 RR
+ - CBR 900 RR FIREBLADE
+ - CFORCE 1000 TOURING OVERLAND
+ - CK1 125
+ - CL 125 T APOLLO
+ - CLASSIC 350
+ - CMX 1100 REBEL
+ - CMX 500 REBEL
+ - CONTINENTAL 535 GT
+ - CONTINENTAL GT 650
+ - CRF 1000 AFRICA TWIN DCT
+ - CRF 1100 AFRICA TWIN DCT
+ - DELIGHT 125
+ - DIABLO 50
+ - DS 900 X
+ - ECHO 50
+ - ECHO PLUS 50
+ - ELIMINATOR 125
+ - EN 125
+ - ER-5
+ - ER-6F
+ - ER-6N
+ - ES 700
+ - F 650 GS
+ - F 700 GS
+ - F 800 ST
+ - F 900 R SE
+ - F 900 XR
+ - F3 675
+ - FIDDLE 125
+ - FJ 1200 ABS
+ - FORZA 125
+ - FORZA 300
+ - FXDC SUPERGLIDE CU
+ - FXDL LOW RIDER
+ - FXST SOFTAIL STANDARD
+ - FZS 600 FAZER
+ - G 310 GS
+ - G 310 R
+ - GL 1500 GOLDWING
+ - GL 1800 GOLDWING DCT
+ - GOLD STAR 650
+ - GP 150
+ - GRS 125
+ - GSF 1250 BANDIT S
+ - GSR 750
+ - GSX 1250 F
+ - GSX 650 F
+ - GSX-R 1000
+ - GSX-R 1000 K5
+ - GSX-R 125
+ - GSX-R 600
+ - GSX-R 750
+ - GSX-S 1000
+ - GSX-S 1000 ABS
+ - GSX-S 1000 GT
+ - GSX-S 125
+ - GSX-S 750
+ - GT 125 I
+ - GT 125 RC
+ - GTR 1400
+ - GW 250 INAZUMA
+ - HAWK
+ - HERO 125
+ - HIMALAYAN 411
+ - HYPERMOTARD 950
+ - INTERCEPTOR 650
+ - IRON 883 XL N
+ - J 125
+ - JET 14 125
+ - JET X 125
+ - K 1200 RS
+ - KISBEE 50 4T
+ - KLE 500
+ - LEONCINO 125
+ - LIBERTY 125
+ - LIBERTY 125 ABS
+ - LIBERTY 125 S ABS
+ - LIKE 125
+ - LS-Z 125
+ - LXR 125
+ - LXS 125
+ - M821 MONSTER
+ - MASK 50
+ - METEOR 350
+ - METEOR 350 E5
+ - METROPOLIS 400 SW
+ - MICHIGAN 125
+ - MONSTER 1100
+ - MONSTER 600 M
+ - MONSTER 620
+ - MP3 300 YOURBAN LT
+ - MSX 125 GROM
+ - MT 125 ABS
+ - MT-07
+ - MT-07 ABS
+ - MT-09 ABS
+ - MT-09 SP
+ - MT-10
+ - MT-125
+ - MT-125 ABS
+ - MULTISTRADA 950
+ - MULTISTRADA V4S
+ - MW125 TRICITY 125
+ - N-MAX 125 ABS
+ - NC 750 X
+ - NHT 125
+ - NINJA 1000 SX
+ - NINJA 650
+ - NINJA H2 SX
+ - NINJA ZX-6R
+ - NMAX 125
+ - NT 650 V DEAUVILLE
+ - NT 700 V DEAUVILLE
+ - OCTANE 1200
+ - ORBIT III 50
+ - PCX 125
+ - PEGASO 650
+ - PIAGGIO ONE
+ - R 1100 RT
+ - R 1100 S
+ - R 1200 GS
+ - R 1200 R
+ - R 1200 RS
+ - R 1200 RT
+ - R 1250 GS ADVENTURE TE
+ - R 1250 GS EXCLUSIVE TE
+ - R NINET RACER S
+ - R1100 R
+ - R66S 125
+ - RC 125
+ - RC 390
+ - REBEL 1100 DCT
+ - RENEGADE COMMANDO 125
+ - RIALTO 50
+ - RKF 125
+ - RKF 125 E5
+ - RKV 125 C
+ - RM1
+ - ROCKET 111 TOURING
+ - RS 660
+ - RS4 125
+ - S 1000 R
+ - S 1000 RR
+ - S 1000 XR
+ - SC 125 S
+ - SCOUT
+ - SCRAMBLER 125
+ - SCRAMBLER 400X
+ - SH 125
+ - SHIVER 900
+ - SHUTTLE 125
+ - SL 750 SHIVER
+ - SPEED 400
+ - SPEED TRIPLE 1050
+ - SPEED TWIN 900
+ - SPEEDFIGHT 4 125 LC
+ - SPORTSTER 1200 S
+ - SPRINT GT 1050 ABS
+ - SR 125
+ - SR 125 DETROIT
+ - SR GT 125
+ - SR GT 125 SPORT
+ - SR MOTARD 125
+ - ST 1300 PAN EUROPEAN
+ - STREET SCRAMBLER 900
+ - STREET TRIPLE 675
+ - STREET TRIPLE 765 RS
+ - SUPER METEOR 650
+ - SUPERLIGHT 125
+ - SUPERLIGHT 125 E5
+ - SV 650
+ - SV 650 S
+ - SVARTPILEN 125
+ - SXR 50
+ - T 595 DAYTONA
+ - TECH MAX 560
+ - TEMPEST 125
+ - TENERE 700 RALLY
+ - TENERE 700 WORLD RAID XZT
+ - TERRAIN 125
+ - THRUXTON 865
+ - THUNDERBIRD SPORT
+ - TIGER 1200 RALLY PRO
+ - TIGER 800 ABS
+ - TIGER SPORT 1050
+ - TL 125
+ - TORNADO NAKED T 125
+ - TRACER 700
+ - TRACER 9 GT
+ - TRACER 900 GT
+ - TRIESTE 50
+ - TRK 502 X
+ - TROPHY 1215 SE
+ - TRX 850
+ - TUONO FIGHTER
+ - TUONO FIGHTER 1000
+ - TUONO V4 1100 FACTORY
+ - TUONO V4 APRC ABS
+ - TURISMO VELOCE 800
+ - TWEET 125
+ - Thruxton 1200 R
+ - V-STROM 1000 GT
+ - V-STROM 650
+ - V-STROM 650 TOURING
+ - V7 STONE
+ - V85 TT
+ - VENOM 125
+ - VERSYS 1000
+ - VERSYS 650
+ - VERYSY 650
+ - VESPA ET4 125
+ - VESPA GTS 300 SUPER ABS
+ - VESPA GTS 300 SUPERTECH
+ - VESPA LX 125 3V
+ - VESPA PRIMAVERA 125 3V
+ - VESPA PRIMAVERA 125 ABS
+ - VESPA PRIMAVERA 50
+ - VESPA SPRINT 125 3V ABS
+ - VFR 1200 F
+ - VFR 1200 X CROSSTOURER
+ - VFR 750 F
+ - VFR 800
+ - VFR 800 F
+ - VFR 800 X CROSSRUNNER
+ - VISAR 125
+ - VISION 110
+ - VN 1500 P1H MEAN STREAK
+ - VN 1600 CLASSIC TOURER
+ - VN 900 CLASSIC
+ - VN 900 CUSTOM
+ - VRSCA V-ROD
+ - VRSCAW V-ROD
+ - VRSCDX NIGHT ROD SPECIAL
+ - VULCAN 650 S
+ - VULCAN S 650
+ - W 800
+ - W 800 CAF
+ - WR 125 R
+ - WR 125 X
+ - X DIAVEL S
+ - X-CAPE 650
+ - X-LIGHT 125
+ - X-MAX 125
+ - X-MAX TECH MAX 125
+ - XC 125 E VITY
+ - XEVO 125 SPORT
+ - XL 125 V VARADERO
+ - XL 700 V TRANSALP
+ - XL 883 R SPORTSTER
+ - XL 883L SPORTSTER
+ - XSR 700 ABS
+ - XSR 900
+ - XT 1200 Z SUPER TENERE
+ - XT 125 X
+ - XTZ 750
+ - XV 1900 A MIDNIGHT STAR
+ - YBR 125
+ - YBR 125 CUSTOM
+ - YN 50 NEO'S
+ - YZF 1000 R THUNDERACE
+ - YZF-R1
+ - YZF-R125
+ - YZF-R6
+ - YZF-R7
+ - Z 1000
+ - Z 1000 SX
+ - Z 300 ABS
+ - Z 650
+ - Z 750
+ - Z 900 RS
+ - ZS 125 TERRAIN
+ - ZSB 125
+ - ZT 125
+ - ZX-10R
+ - ZX-6R NINJA 636
+ - ZX-9R NINJA
+ - ZZR 1400 ABS
+
+================================================================================
+Submodel (1 unique)
+ - R
+
+================================================================================
+Transmission (3 unique)
+ - AUTOMATIC
+ - MANUAL
+ - Manual
+
+================================================================================
+Type (11 unique)
+ - CHOPPER/CRUISER
+ - ELECTRIC MOTORCYCLE
+ - ENDURO/SUPERMOTO (ROAD LEGAL)
+ - MINI BIKE/MONKEY BIKE
+ - QUAD/ATV
+ - SCOOTER
+ - SPORTS TOURING
+ - SUPER SPORT
+ - Sports Touring
+ - TOURER
+ - TRIKE (ROAD LEGAL)
+
+================================================================================
+V5 Registration Document (1 unique)
+ - Present
+
+================================================================================
+Vehicle Type (1 unique)
+ - Sports Touring
+
+================================================================================
+Year (34 unique)
+ - 1979
+ - 1991
+ - 1992
+ - 1994
+ - 1996
+ - 1997
+ - 1998
+ - 1999
+ - 2000
+ - 2001
+ - 2002
+ - 2003
+ - 2004
+ - 2005
+ - 2006
+ - 2007
+ - 2008
+ - 2009
+ - 2010
+ - 2011
+ - 2012
+ - 2013
+ - 2014
+ - 2015
+ - 2016
+ - 2017
+ - 2018
+ - 2019
+ - 2020
+ - 2021
+ - 2022
+ - 2023
+ - 2024
+ - 2025
+
+2025-11-18T19:19:29 [INFO] __main__: Done – printed 20 attributes

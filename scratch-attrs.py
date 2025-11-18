@@ -26,7 +26,12 @@ from infrastructure.utils.logger import get_logger
 logger = get_logger(__name__)
 
 #SOURCE = "ebay-consoles"
-SOURCE = "ebay-apple"
+#SOURCE = "ebay-apple"
+#SOURCE = "ebay-actioncams"
+#SOURCE = "ebay-retro-pc"
+#SOURCE = "ebay-watches"
+#SOURCE = "ebay-tools"
+SOURCE = "motomine"
 
 
 def _to_str(v: Any) -> str | None:

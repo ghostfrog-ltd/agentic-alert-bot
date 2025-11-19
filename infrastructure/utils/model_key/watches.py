@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from typing import Mapping, Any, Optional
-from typing import Optional, Dict, Any
 
-def _clean(s: Any) -> str:
+UNKNOWN_KEY = "unknown"
+
+
+def _clean_alnum(s: Any) -> str:
     """
     Uppercase, strip, remove non-alphanumeric.
+    Used for brand / reference / model core tokens.
     """
     if s is None:
         return ""
@@ -14,65 +17,73 @@ def _clean(s: Any) -> str:
     return re.sub(r"[^A-Z0-9]", "", s)
 
 
-def _clean_brand(raw: Any) -> Optional[str]:
-    b = _clean(raw)
-    return b or None
+def _clean_brand(raw: Any) -> str:
+    """
+    Normalise brand to a lowercase alphanumeric token.
+    Examples:
+        "Seiko"  -> "seiko"
+        "G-SHOCK" -> "gshock"
+    """
+    b = _clean_alnum(raw)
+    return b.lower() if b else ""
 
 
 def _extract_reference(attrs: Mapping[str, Any]) -> Optional[str]:
     """
     Use 'Reference Number' if present.
     Sometimes it's a list like ['2F70-5330', '2F70'] – pick the longest.
+
+    Returns a lowercase alphanumeric token, or None if not useful.
     """
     ref = attrs.get("Reference Number") or attrs.get("ReferenceNumber")
     if not ref:
         return None
 
     if isinstance(ref, list):
-        candidates = [ _clean(r) for r in ref if _clean(r) ]
+        candidates = [_clean_alnum(r) for r in ref if _clean_alnum(r)]
         if not candidates:
             return None
         # take the longest cleaned ref (most specific)
         best = max(candidates, key=len)
     else:
-        best = _clean(ref)
+        best = _clean_alnum(ref)
 
     if best in {"NONE", "NA", "N/A", "NOTAPPLICABLE"}:
         return None
 
-    return best or None
+    best = best.strip()
+    return best.lower() or None
 
 
 def _extract_model_core(
     attrs: Mapping[str, Any],
-    title: Optional[str],
-    brand_norm: Optional[str],
+    brand_norm: str,
 ) -> Optional[str]:
     """
     Fallback when we don't have a good reference number.
 
-    Use Model first; if that's missing, fall back to the title.
-    Strip the brand prefix if duplicated.
+    Use Model (or Watch Model) only — no title fallback.
+
+    - Strip brand prefix if duplicated, e.g. "SEIKO 5" -> "5"
+    - Split on space / dash / slash
+    - Remove non-alphanumeric characters per token
+    - Drop generic words like WATCH/MENS/WOMENS/UNISEX
+    - Glue remaining tokens together
+
+    Returns a lowercase alphanumeric string, or None.
     """
     raw_model = attrs.get("Model") or attrs.get("Watch Model")
-    source = None
-
-    if raw_model:
-        source = str(raw_model)
-    elif title:
-        source = title
-    else:
+    if not raw_model:
         return None
 
-    s = source.strip().upper()
+    s = str(raw_model).strip().upper()
 
     # remove obvious brand prefix if present: "SEIKO 5" -> "5"
     if brand_norm:
-        bn = brand_norm
+        bn = brand_norm.upper()
         if s.startswith(bn + " "):
             s = s[len(bn) + 1 :]
 
-    # very light token clean: just remove non-alnum and glue
     tokens = re.split(r"[ \-/]+", s)
     pieces: list[str] = []
     for tok in tokens:
@@ -87,38 +98,42 @@ def _extract_model_core(
     if not pieces:
         return None
 
-    return "".join(pieces)
+    # Return lowercase joined token, e.g. ["F", "91W"] -> "f91w"
+    return "".join(pieces).lower()
 
-def watch_model_key(    attrs: Mapping[str, Any],
-    title: Optional[str] = None,
-) -> Optional[str]:
+
+def watch_model_key(
+    attrs: Mapping[str, Any],
+    title: Optional[str] = None,  # kept for call-site compatibility, ignored
+) -> str:
     """
-    Canonical key for watches.
+    Canonical key for watches (attrs-only, no title).
 
     Priority:
-      1) BRAND-REF         (when Reference Number present)
-      2) BRAND-MODELCORE   (fallback using Model / title)
+      1) brand-ref         (when 'Reference Number' present)
+      2) brand-modelcore   (fallback using Model / Watch Model)
 
     Examples:
-      Seiko Skyliner, ref 6222-8000      -> SEIKO-62228000
-      Seiko 5, ref 7S26-0480             -> SEIKO-7S260480
-      Casio F-91W                        -> CASIO-F91W
-      G-SHOCK Mudman GW-9500            -> GSHOCK-GW9500
-      Joubert '1930's Celeb' (no ref)   -> JOUBERT-1930SCELEB
+      Brand="Seiko",  Reference="6222-8000"          -> "seiko-62228000"
+      Brand="Seiko",  Model="Seiko 5"               -> "seiko-5"
+      Brand="Casio",  Model="F-91W"                 -> "casio-f91w"
+      Brand="G-SHOCK", Model="Mudman GW-9500"       -> "gshock-gw9500"
+
+    If we can't classify, returns "unknown".
     """
     attrs = attrs or {}
     brand = _clean_brand(attrs.get("Brand"))
     if not brand:
-        return None
+        return UNKNOWN_KEY
 
     # 1) Try reference number (most specific)
     ref = _extract_reference(attrs)
     if ref:
         return f"{brand}-{ref}"
 
-    # 2) Fall back to model / title
-    model_core = _extract_model_core(attrs, title, brand)
+    # 2) Fall back to model
+    model_core = _extract_model_core(attrs, brand)
     if model_core:
         return f"{brand}-{model_core}"
 
-    return None
+    return UNKNOWN_KEY

@@ -1,146 +1,243 @@
+# agent/model_keys/tools.py
 from __future__ import annotations
 
-import re
 from typing import Mapping, Any, Optional
+
+UNKNOWN_KEY = "unknown"
 
 
 def _clean(s: Any) -> str:
+    """
+    Basic string cleaner:
+    - Convert None → ""
+    - Strip whitespace
+    """
+    if s is None:
+        return ""
+    return str(s).strip()
+
+
+def _strip_parentheses(s: str) -> str:
+    """
+    Remove anything inside parentheses, including the parentheses themselves.
+    Example:
+        "Dewalt DCF899N-XJ (Body Only)" -> "Dewalt DCF899N-XJ "
+    """
+    cleaned = []
+    depth = 0
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            continue
+        if ch == ")":
+            if depth > 0:
+                depth -= 1
+            continue
+        if depth == 0:
+            cleaned.append(ch)
+    return "".join(cleaned)
+
+
+def _normalise_brand(raw: Any) -> str:
+    """
+    Normalise Brand into a compact token for the key.
+
+    Rules:
+    - Use Brand only
+    - Lowercase
+    - Remove spaces and non-alphanumeric chars
+
+    Examples:
+        "DEWALT"     -> "dewalt"
+        "Makita"     -> "makita"
+        "Pro-Max Professional Quality Tools" -> "promaxprofessionalqualitytools"
+    """
+    s = _clean(raw)
     if not s:
         return ""
-    s = str(s).strip().upper()
-    return re.sub(r"[^A-Z0-9]", "", s)
+
+    out = []
+    for ch in s.lower():
+        if ch.isalnum():
+            out.append(ch)
+    return "".join(out)
 
 
-def _extract_brand(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
-    # Prefer structured fields
-    for key in ("Brand", "Manufacturer", "Maker"):
-        b = _clean(attrs.get(key))
-        if b:
-            return b
+def _is_garbage_model(s: str) -> bool:
+    """
+    Heuristics for useless model strings we should treat as missing.
+    """
+    low = s.lower()
+    if not low:
+        return True
 
-    # Fallback: sniff from title
-    if title:
-        t = title.upper()
-        for kb in [
-            "DEWALT", "MAKITA", "BOSCH", "MILWAUKEE", "RYOBI", "HILTI", "FESTOOL",
-            "HIKOKI", "METABO", "AEG", "BLACK+DECKER", "BLACK & DECKER",
-            "PARKSIDE", "WORX", "EINHELL", "MAC ALLISTER", "STANLEY"
-        ]:
-            if kb in t:
-                return _clean(kb)
+    bad_exact = {
+        "n/a",
+        "na",
+        "unknown",
+        "does not apply",
+        "doesn't apply",
+        "doesnt apply",
+        "see description",
+        "see descriptions",
+        "see pictures",
+        "as the description shows",
+        "other",
+    }
+    if low in bad_exact:
+        return True
 
-    return None
+    if "does not apply" in low:
+        return True
 
-
-def _extract_action(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
-    # Prefer structured action / type
-    for key in ("Action", "Tool Type", "Type"):
-        a = _clean(attrs.get(key))
-        if a:
-            return a
-
-    # Fallback: infer from title with common patterns
-    if title:
-        t = title.upper()
-        patterns = {
-            "COMBI": "COMBIDRILL",
-            "HAMMER": "HAMMERDRILL",
-            "IMPACT": "IMPACTDRIVER",
-            "SDS": "SDSPLUS",
-            "CIRCULAR": "CIRCULARSAW",
-            "JIGSAW": "JIGSAW",
-            "RECIP": "RECIPSAW",
-            "GRINDER": "ANGLEGRINDER",
-            "MULTI": "MULTITOOL",
-            "ROUTER": "ROUTER",
-            "PLANER": "PLANER",
-            "MITRE": "MITRE",
-        }
-        for needle, out in patterns.items():
-            if needle in t:
-                return out
-
-    return None
+    return False
 
 
-def _extract_power(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
-    power_fields = [
-        "Power", "Voltage", "Volts", "Wattage", "W", "V"
-    ]
+def _tokenise_model_like(s: str) -> list[str]:
+    """
+    Common tokenisation logic for Model/MPN/Type:
+    - strip parentheses
+    - normalise separators (/, \, -) to spaces
+    - collapse multiple spaces
+    - split, strip non-alphanumerics per token
+    - lowercase
+    """
+    s = _strip_parentheses(s)
 
-    # Prefer structured power info
-    for key in power_fields:
-        v = attrs.get(key)
-        if v:
-            return _normalise_power(str(v))
+    s = s.replace("/", " ")
+    s = s.replace("\\", " ")
+    s = s.replace("-", " ")
+    s = " ".join(s.split())
 
-    # Fallback from title
-    if title:
-        t = title.upper()
+    if not s:
+        return []
 
-        # 18V, 20V, 230V, etc
-        m = re.search(r"\b(\d+)\s*V\b", t)
-        if m:
-            return f"{m.group(1)}V"
+    tokens: list[str] = []
+    for tok in s.split():
+        alnum = "".join(ch for ch in tok if ch.isalnum())
+        if not alnum:
+            continue
+        tokens.append(alnum.lower())
 
-        # 710W, 1200W, etc
-        m = re.search(r"\b(\d+)\s*W\b", t)
-        if m:
-            return f"{m.group(1)}W"
-
-    return None
-
-
-def _normalise_power(raw: str) -> Optional[str]:
-    raw = raw.upper()
-
-    # extract number + V/W
-    m = re.search(r"(\d+)\s*(V|W)", raw)
-    if not m:
-        return None
-    num, unit = m.group(1), m.group(2)
-    return f"{num}{unit}"
+    return tokens
 
 
-def _extract_model(attrs: Mapping[str, Any], title: Optional[str]) -> Optional[str]:
-    for key in ("Model", "MPN", "Manufacturer Part Number", "PartNumber", "Part Number"):
-        v = _clean(attrs.get(key))
-        if v and v not in {"NONE", "NA", "DOESNOTAPPLY"}:
-            return v
+def _normalise_model_from_model(raw_model: Any, raw_brand: Any) -> str:
+    """
+    Normalise the Model into a compact, bucketable token.
 
-    # Fallback: scrape model-like token from title (optional)
-    if title:
-        t = title.upper()
-        m = re.findall(r"\b[A-Z0-9]{3,}\b", t)
-        # Only return a model if it's code-like
-        for tok in m:
-            if any(c.isdigit() for c in tok):
-                return _clean(tok)
+    Priority path:
+    - Use attrs["Model"], cleaned
+    - Drop leading brand token if it repeats Brand
+      e.g. Brand="DEWALT", Model="DEWALT DCF899N-XJ" -> "dcf899nxj"
+    - Return "" if it's garbage/unusable.
+    """
+    s = _clean(raw_model)
+    if not s or _is_garbage_model(s):
+        return ""
 
-    return None
+    tokens = _tokenise_model_like(s)
+    if not tokens:
+        return ""
+
+    # Try to drop leading brand word if it matches
+    brand_clean = _clean(raw_brand)
+    brand_tokens = brand_clean.split()
+    brand_first = brand_tokens[0].lower() if brand_tokens else ""
+
+    if brand_first and tokens and tokens[0] == brand_first.lower():
+        tokens = tokens[1:]
+
+    if not tokens:
+        return ""
+
+    return "".join(tokens)
+
+
+def _normalise_model_from_mpn(raw_mpn: Any) -> str:
+    """
+    Fallback: build a model-like token from MPN if Model was useless/missing.
+    """
+    s = _clean(raw_mpn)
+    if not s or _is_garbage_model(s):
+        return ""
+
+    tokens = _tokenise_model_like(s)
+    if not tokens:
+        return ""
+
+    return "".join(tokens)
+
+
+def _normalise_model_from_type(raw_type: Any) -> str:
+    """
+    Second fallback: use Type as the model-like token (angle grinder, planer, etc.)
+    """
+    s = _clean(raw_type)
+    if not s or _is_garbage_model(s):
+        return ""
+
+    tokens = _tokenise_model_like(s)
+    if not tokens:
+        return ""
+
+    return "".join(tokens)
 
 
 def tools_model_key(
     attrs: Mapping[str, Any],
-    title: Optional[str] = None,
+    title: str = "",
 ) -> Optional[str]:
     """
-    Build a canonical key for tools:
-      ACTION-POWER-BRAND[-MODEL]
+    Build a canonical model key for power tools (source='ebay-tools') using ONLY attrs.
+
+    Desired output style:
+        {brand}-{model}
+
+    Examples (given your attributes):
+        Brand="DEWALT", Model="DEWALT DCF899N-XJ"
+            -> "dewalt-dcf899nxj"
+
+        Brand="DEWALT", Model="DCS565N"
+            -> "dewalt-dcs565n"
+
+        Brand="Makita", Model="DHS680Z"
+            -> "makita-dhs680z"
+
+        Brand="Bosch", Model="Bosch PSA 700 E"
+            -> "bosch-psa700e"
+
+        Brand="Terratek", Model="Terratek Rotary Multi Tool 150 pcs"
+            -> "terratek-rotarymultitool150pcs"
+
+    Fallbacks:
+        - If Model is missing/garbage, use MPN.
+        - If MPN is missing/garbage, use Type.
+        - If Brand missing OR all candidates for model are missing/garbage → "unknown".
+
+    `title` is ignored; it's here purely for call-site compatibility.
     """
+    raw_brand = attrs.get("Brand")
+    raw_model = attrs.get("Model")
+    raw_mpn = attrs.get("MPN")
+    raw_type = attrs.get("Type")
 
-    action = _extract_action(attrs, title)
-    power = _extract_power(attrs, title)
-    brand = _extract_brand(attrs, title)
-    model = _extract_model(attrs, title)
+    brand = _normalise_brand(raw_brand)
+    if not brand:
+        return UNKNOWN_KEY
 
-    if not action or not power or not brand:
-        return None  # missing fundamentals
+    # 1) Primary: Model
+    model = _normalise_model_from_model(raw_model, raw_brand)
 
-    key = f"{action}-{power}-{brand}"
+    # 2) Fallback: MPN
+    if not model:
+        model = _normalise_model_from_mpn(raw_mpn)
 
-    # model optional
-    if model:
-        key += f"-{model}"
+    # 3) Fallback: Type
+    if not model:
+        model = _normalise_model_from_type(raw_type)
 
-    return key
+    if not model:
+        return UNKNOWN_KEY
+
+    return f"{brand}-{model}"

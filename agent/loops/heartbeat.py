@@ -198,120 +198,119 @@ def tick():
 
         spent_total = 0.0
 
-        try:
-            # Phase 1: CLOSE ENDED
-            if feat_close and close_ended and spent_total < HEARTBEAT_BUDGET_S:
-                t0 = perf_counter()
-                try:
-                    close_ended()
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] close_ended OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] close_ended FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
-
-            # Phase 2: SCRAPE SOURCES (ingest fresh listings via eBay API)
-            if feat_scrape and auth_ok and run_scrape:
-                t0 = perf_counter()
-                try:
-                    run_scrape(ebay_token=ebay_token)
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
-            elif feat_scrape and not auth_ok:
-                logger.warning(
-                    "[Heartbeat] scrape_sources skipped (no valid eBay token)"
+        # Phase 1: CLOSE ENDED
+        if feat_close and close_ended and spent_total < HEARTBEAT_BUDGET_S:
+            t0 = perf_counter()
+            try:
+                close_ended()
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] close_ended OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] close_ended FAILED in {phase_dt:.2f}s: {e}"
                 )
+            spent_total += phase_dt
 
-            # Phase 3: COMPS REFRESH (recompute rolling medians/means)
-            if feat_comps and spent_total < HEARTBEAT_BUDGET_S and run_comps:
-                t0 = perf_counter()
-                try:
-                    run_comps(force=False)
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] process.comps OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
+        # Phase 2: SCRAPE SOURCES (ingest fresh listings via eBay API)
+        if feat_scrape and auth_ok and run_scrape:
+            t0 = perf_counter()
+            try:
+                run_scrape(ebay_token=ebay_token)
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}"
+                )
+            spent_total += phase_dt
+        elif feat_scrape and not auth_ok:
+            logger.warning(
+                "[Heartbeat] scrape_sources skipped (no valid eBay token)"
+            )
 
-            # Phase 3.5: ATTRIBUTES BACKFILL (Trading GetItem → raw_attrs + typed fields)
-            if feat_attrs and backfill_attrs and spent_total < HEARTBEAT_BUDGET_S:
-                t0 = perf_counter()
-                try:
-                    backfill_attrs(
-                        limit=ATTR_BACKFILL_LIMIT,
-                        enable_api=ALLOW_EBAY_API,
-                    )
-                    phase_dt = perf_counter() - t0
-                    logger.info(
-                        f"[Heartbeat] attrs_backfill (limit={ATTR_BACKFILL_LIMIT}) OK in {phase_dt:.2f}s"
-                    )
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] attrs_backfill FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
+        # Phase 3: COMPS REFRESH (recompute rolling medians/means)
+        if feat_comps and spent_total < HEARTBEAT_BUDGET_S and run_comps:
+            t0 = perf_counter()
+            try:
+                run_comps(force=False)
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] process.comps OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}"
+                )
+            spent_total += phase_dt
 
-            # Phase 4: SCAN HOT LISTINGS (look for flips about to finish)
-            if feat_hot and hot_listings and spent_total < HEARTBEAT_BUDGET_S:
-                t0 = perf_counter()
-                try:
-                    hot_listings()
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
+        # Phase 3.5: ATTRIBUTES BACKFILL (Trading GetItem → raw_attrs + typed fields)
+        if feat_attrs and backfill_attrs and spent_total < HEARTBEAT_BUDGET_S:
+            t0 = perf_counter()
+            try:
+                backfill_attrs(
+                    limit=ATTR_BACKFILL_LIMIT,
+                    enable_api=ALLOW_EBAY_API,
+                )
+                phase_dt = perf_counter() - t0
+                logger.info(
+                    f"[Heartbeat] attrs_backfill (limit={ATTR_BACKFILL_LIMIT}) OK in {phase_dt:.2f}s"
+                )
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] attrs_backfill FAILED in {phase_dt:.2f}s: {e}"
+                )
+            spent_total += phase_dt
 
-            # Phase 5: FLIPS + ALERT DIGEST
-            if feat_roi and roi and spent_total < HEARTBEAT_BUDGET_S:
-                t0 = perf_counter()
-                try:
-                    roi(limit_output=10)
-                    phase_dt = perf_counter() - t0
-                    logger.info(f"[Heartbeat] roi OK in {phase_dt:.2f}s")
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(f"[Heartbeat] roi FAILED in {phase_dt:.2f}s: {e}")
-                spent_total += phase_dt
+        # Phase 4: SCAN HOT LISTINGS (look for flips about to finish)
+        if feat_hot and hot_listings and spent_total < HEARTBEAT_BUDGET_S:
+            t0 = perf_counter()
+            try:
+                hot_listings()
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}"
+                )
+            spent_total += phase_dt
 
-            # Phase 6: NEW LISTING ALERTS
-            if (
-                feat_alerts
-                and alert_new_listings
-                and spent_total < HEARTBEAT_BUDGET_S
-            ):
-                t0 = perf_counter()
-                try:
-                    alert_new_listings()
-                    phase_dt = perf_counter() - t0
-                    logger.info(
-                        f"[Heartbeat] alert_new_listings OK in {phase_dt:.2f}s"
-                    )
-                except Exception as e:
-                    phase_dt = perf_counter() - t0
-                    logger.error(
-                        f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}"
-                    )
-                spent_total += phase_dt
+        # Phase 5: FLIPS + ALERT DIGEST
+        if feat_roi and roi and spent_total < HEARTBEAT_BUDGET_S:
+            t0 = perf_counter()
+            try:
+                roi(limit_output=10)
+                phase_dt = perf_counter() - t0
+                logger.info(f"[Heartbeat] roi OK in {phase_dt:.2f}s")
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(f"[Heartbeat] roi FAILED in {phase_dt:.2f}s: {e}")
+            spent_total += phase_dt
 
-            total_dt = perf_counter() - start_wall
-            logger.info(f"[Heartbeat] TOTAL {total_dt:.2f}s (spent={spent_total:.2f}s)")
+        # Phase 6: NEW LISTING ALERTS
+        if (
+            feat_alerts
+            and alert_new_listings
+            and spent_total < HEARTBEAT_BUDGET_S
+        ):
+            t0 = perf_counter()
+            try:
+                alert_new_listings()
+                phase_dt = perf_counter() - t0
+                logger.info(
+                    f"[Heartbeat] alert_new_listings OK in {phase_dt:.2f}s"
+                )
+            except Exception as e:
+                phase_dt = perf_counter() - t0
+                logger.error(
+                    f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}"
+                )
+            spent_total += phase_dt
+
+        total_dt = perf_counter() - start_wall
+        logger.info(f"[Heartbeat] TOTAL {total_dt:.2f}s (spent={spent_total:.2f}s)")
 
     finally:
         logger.info("\n\n===================== 🫀 HEARTBEAT END =====================\n")

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-import os, time, random, threading
+import os
+import time
+import random
+import threading
 from time import perf_counter
+
 from dotenv import load_dotenv
+
 from infrastructure.utils.logger import get_logger
 from agent.reminders import check_and_send_reem_reminders
 
@@ -99,6 +104,9 @@ PHASE_CLOSE_BUDGET_S = float(os.getenv("GF_PHASE_CLOSE_BUDGET_S", "80"))
 
 MAX_API_CALLS = int(os.getenv("GF_MAX_API_CALLS", "6000"))
 
+# NEW: master switch for *any* eBay API usage in this env
+ALLOW_EBAY_API = env_flag("GF_ALLOW_EBAY_API", "0")
+
 # NEW: how many listings per tick to backfill attrs for
 ATTR_BACKFILL_LIMIT = int(os.getenv("GF_ATTR_BACKFILL_LIMIT", "1"))
 
@@ -118,153 +126,192 @@ def tick():
     logger.info("\n\n==================== 🫀 HEARTBEAT START ====================\n")
 
     try:
-        check_and_send_reem_reminders()
-    except Exception as e:
-        logger.exception("[Reem] reminder check failed: %s", e)
-
-    # -------------------------------------------------
-    # take snapshot of feature toggles for THIS run
-    # (we do NOT mutate the module-level FEAT_* globals)
-    # -------------------------------------------------
-    feat_close = FEAT_CLOSE
-    feat_scrape = FEAT_SCRAPE
-    feat_roi = FEAT_ROI
-    feat_comps = FEAT_COMPS
-    feat_hot = FEAT_HOT
-    feat_alerts = FEAT_ALERTS
-    feat_attrs = FEAT_ATTRS  # NEW
-
-    # -------------------------------------------------
-    # eBay auth preflight
-    # -------------------------------------------------
-    ebay_token = None
-    auth_ok = False
-    if get_auth:
         try:
-            ebay_token = get_auth().get_token()
-            auth_ok = True
-            logger.info("[Heartbeat] eBay auth OK (token acquired)")
-        except EbayAuthError as e:
-            logger.error(f"[Heartbeat] eBay auth failed: {e}")
+            check_and_send_reem_reminders()
         except Exception as e:
-            logger.error(f"[Heartbeat] eBay auth unexpected error: {e}")
-    else:
-        logger.error("[Heartbeat] eBay auth helper not available")
+            logger.exception("[Reem] reminder check failed: %s", e)
 
-    # -------------------------------------------------
-    # Daily API usage guard
-    # if we're over budget, kill the eBay-heavy phases
-    # -------------------------------------------------
-    if get_api_usage_today:
-        usage = get_api_usage_today("ebay")
-        if usage >= MAX_API_CALLS:
+        # -------------------------------------------------
+        # take snapshot of feature toggles for THIS run
+        # (we do NOT mutate the module-level FEAT_* globals)
+        # -------------------------------------------------
+        feat_close = FEAT_CLOSE
+        feat_scrape = FEAT_SCRAPE
+        feat_roi = FEAT_ROI
+        feat_comps = FEAT_COMPS
+        feat_hot = FEAT_HOT
+        feat_alerts = FEAT_ALERTS
+        feat_attrs = FEAT_ATTRS  # NEW
+
+        # -------------------------------------------------
+        # Env-level eBay API master switch
+        # -------------------------------------------------
+        if not ALLOW_EBAY_API:
             logger.warning(
-                f"[Heartbeat] Daily eBay API usage {usage} >= {MAX_API_CALLS}, "
-                f"skipping eBay phases"
+                "[Heartbeat] GF_ALLOW_EBAY_API=0 – disabling eBay API phases "
+                "(scrape + attrs backfill, Trading API)"
             )
-            feat_close = False
             feat_scrape = False
-            feat_roi = False
-            feat_comps = False
-            feat_hot = False
-            feat_alerts = False
-            feat_attrs = False  # NEW: also disable attrs backfill
+            feat_attrs = False
 
-    spent_total = 0.0
+        # -------------------------------------------------
+        # eBay auth preflight
+        # -------------------------------------------------
+        ebay_token = None
+        auth_ok = False
 
-    try:
-        # Phase 1: CLOSE ENDED
-        if feat_close and close_ended and spent_total < HEARTBEAT_BUDGET_S:
-            t0 = perf_counter()
-            try:
-                close_ended()
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] close_ended OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] close_ended FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
+        if ALLOW_EBAY_API:
+            if get_auth:
+                try:
+                    ebay_token = get_auth().get_token()
+                    auth_ok = True
+                    logger.info("[Heartbeat] eBay auth OK (token acquired)")
+                except EbayAuthError as e:
+                    logger.error(f"[Heartbeat] eBay auth failed: {e}")
+                except Exception as e:
+                    logger.error(f"[Heartbeat] eBay auth unexpected error: {e}")
+            else:
+                logger.error("[Heartbeat] eBay auth helper not available")
+        else:
+            logger.info(
+                "[Heartbeat] eBay API disabled by GF_ALLOW_EBAY_API=0 (skipping auth)"
+            )
 
-        # Phase 2: SCRAPE SOURCES (ingest fresh listings via eBay API)
-        if feat_scrape and auth_ok and run_scrape:
-            t0 = perf_counter()
-            try:
-                run_scrape(ebay_token=ebay_token)
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
-        elif feat_scrape and not auth_ok:
-            logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
-
-        # Phase 3: COMPS REFRESH (recompute rolling medians/means)
-        if feat_comps and spent_total < HEARTBEAT_BUDGET_S and run_comps:
-            t0 = perf_counter()
-            try:
-                run_comps(force=False)
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] process.comps OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
-
-        # Phase 3.5: ATTRIBUTES BACKFILL (Trading GetItem → raw_attrs + typed fields)
-        if feat_attrs and backfill_attrs and spent_total < HEARTBEAT_BUDGET_S:
-            t0 = perf_counter()
-            try:
-                backfill_attrs(limit=ATTR_BACKFILL_LIMIT, enable_api=True)
-                phase_dt = perf_counter() - t0
-                logger.info(
-                    f"[Heartbeat] attrs_backfill (limit={ATTR_BACKFILL_LIMIT}) OK in {phase_dt:.2f}s"
+        # -------------------------------------------------
+        # Daily API usage guard
+        # if we're over budget, kill the eBay-heavy phases
+        # -------------------------------------------------
+        if get_api_usage_today and ALLOW_EBAY_API:
+            usage = get_api_usage_today("ebay")
+            if usage >= MAX_API_CALLS:
+                logger.warning(
+                    f"[Heartbeat] Daily eBay API usage {usage} >= {MAX_API_CALLS}, "
+                    f"skipping eBay phases"
                 )
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(
-                    f"[Heartbeat] attrs_backfill FAILED in {phase_dt:.2f}s: {e}"
+                feat_close = False
+                feat_scrape = False
+                feat_roi = False
+                feat_comps = False
+                feat_hot = False
+                feat_alerts = False
+                feat_attrs = False  # NEW: also disable attrs backfill
+
+        spent_total = 0.0
+
+        try:
+            # Phase 1: CLOSE ENDED
+            if feat_close and close_ended and spent_total < HEARTBEAT_BUDGET_S:
+                t0 = perf_counter()
+                try:
+                    close_ended()
+                    phase_dt = perf_counter() - t0
+                    logger.info(f"[Heartbeat] close_ended OK in {phase_dt:.2f}s")
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] close_ended FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
+
+            # Phase 2: SCRAPE SOURCES (ingest fresh listings via eBay API)
+            if feat_scrape and auth_ok and run_scrape:
+                t0 = perf_counter()
+                try:
+                    run_scrape(ebay_token=ebay_token)
+                    phase_dt = perf_counter() - t0
+                    logger.info(f"[Heartbeat] scrape_sources OK in {phase_dt:.2f}s")
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] scrape_sources FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
+            elif feat_scrape and not auth_ok:
+                logger.warning(
+                    "[Heartbeat] scrape_sources skipped (no valid eBay token)"
                 )
-            spent_total += phase_dt
 
-        # Phase 4: SCAN HOT LISTINGS (look for flips about to finish)
-        if feat_hot and hot_listings and spent_total < HEARTBEAT_BUDGET_S:
-            t0 = perf_counter()
-            try:
-                hot_listings()
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
+            # Phase 3: COMPS REFRESH (recompute rolling medians/means)
+            if feat_comps and spent_total < HEARTBEAT_BUDGET_S and run_comps:
+                t0 = perf_counter()
+                try:
+                    run_comps(force=False)
+                    phase_dt = perf_counter() - t0
+                    logger.info(f"[Heartbeat] process.comps OK in {phase_dt:.2f}s")
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
 
-        # Phase 5: FLIPS + ALERT DIGEST
-        if feat_roi and roi and spent_total < HEARTBEAT_BUDGET_S:
-            t0 = perf_counter()
-            try:
-                roi(limit_output=10)
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] roi OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] roi FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
+            # Phase 3.5: ATTRIBUTES BACKFILL (Trading GetItem → raw_attrs + typed fields)
+            if feat_attrs and backfill_attrs and spent_total < HEARTBEAT_BUDGET_S:
+                t0 = perf_counter()
+                try:
+                    backfill_attrs(
+                        limit=ATTR_BACKFILL_LIMIT,
+                        enable_api=ALLOW_EBAY_API,
+                    )
+                    phase_dt = perf_counter() - t0
+                    logger.info(
+                        f"[Heartbeat] attrs_backfill (limit={ATTR_BACKFILL_LIMIT}) OK in {phase_dt:.2f}s"
+                    )
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] attrs_backfill FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
 
-        # Phase 6: NEW LISTING ALERTS
-        if feat_alerts and alert_new_listings and spent_total < HEARTBEAT_BUDGET_S:
-            t0 = perf_counter()
-            try:
-                alert_new_listings()
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] alert_new_listings OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
+            # Phase 4: SCAN HOT LISTINGS (look for flips about to finish)
+            if feat_hot and hot_listings and spent_total < HEARTBEAT_BUDGET_S:
+                t0 = perf_counter()
+                try:
+                    hot_listings()
+                    phase_dt = perf_counter() - t0
+                    logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
 
-        total_dt = perf_counter() - start_wall
-        logger.info(f"[Heartbeat] TOTAL {total_dt:.2f}s (spent={spent_total:.2f}s)")
+            # Phase 5: FLIPS + ALERT DIGEST
+            if feat_roi and roi and spent_total < HEARTBEAT_BUDGET_S:
+                t0 = perf_counter()
+                try:
+                    roi(limit_output=10)
+                    phase_dt = perf_counter() - t0
+                    logger.info(f"[Heartbeat] roi OK in {phase_dt:.2f}s")
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(f"[Heartbeat] roi FAILED in {phase_dt:.2f}s: {e}")
+                spent_total += phase_dt
+
+            # Phase 6: NEW LISTING ALERTS
+            if (
+                feat_alerts
+                and alert_new_listings
+                and spent_total < HEARTBEAT_BUDGET_S
+            ):
+                t0 = perf_counter()
+                try:
+                    alert_new_listings()
+                    phase_dt = perf_counter() - t0
+                    logger.info(
+                        f"[Heartbeat] alert_new_listings OK in {phase_dt:.2f}s"
+                    )
+                except Exception as e:
+                    phase_dt = perf_counter() - t0
+                    logger.error(
+                        f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}"
+                    )
+                spent_total += phase_dt
+
+            total_dt = perf_counter() - start_wall
+            logger.info(f"[Heartbeat] TOTAL {total_dt:.2f}s (spent={spent_total:.2f}s)")
 
     finally:
         logger.info("\n\n===================== 🫀 HEARTBEAT END =====================\n")
@@ -298,23 +345,38 @@ def tick_once():
         feat_alerts = FEAT_ALERTS
         feat_attrs = FEAT_ATTRS
 
+        # Env-level eBay API master switch
+        if not ALLOW_EBAY_API:
+            logger.warning(
+                "[Heartbeat] GF_ALLOW_EBAY_API=0 – disabling eBay API phases "
+                "(scrape + attrs backfill, Trading API)"
+            )
+            feat_scrape = False
+            feat_attrs = False
+
         # eBay auth preflight
         ebay_token = None
         auth_ok = False
-        if get_auth:
-            try:
-                ebay_token = get_auth().get_token()
-                auth_ok = True
-                logger.info("[Heartbeat] eBay auth OK (token acquired)")
-            except EbayAuthError as e:
-                logger.error(f"[Heartbeat] eBay auth failed: {e}")
-            except Exception as e:
-                logger.error(f"[Heartbeat] eBay auth unexpected error: {e}")
+
+        if ALLOW_EBAY_API:
+            if get_auth:
+                try:
+                    ebay_token = get_auth().get_token()
+                    auth_ok = True
+                    logger.info("[Heartbeat] eBay auth OK (token acquired)")
+                except EbayAuthError as e:
+                    logger.error(f"[Heartbeat] eBay auth failed: {e}")
+                except Exception as e:
+                    logger.error(f"[Heartbeat] eBay auth unexpected error: {e}")
+            else:
+                logger.error("[Heartbeat] eBay auth helper not available")
         else:
-            logger.error("[Heartbeat] eBay auth helper not available")
+            logger.info(
+                "[Heartbeat] eBay API disabled by GF_ALLOW_EBAY_API=0 (skipping auth)"
+            )
 
         # daily API usage guard
-        if get_api_usage_today:
+        if get_api_usage_today and ALLOW_EBAY_API:
             usage = get_api_usage_today("ebay")
             if usage >= MAX_API_CALLS:
                 logger.warning(
@@ -331,8 +393,7 @@ def tick_once():
         spent_total = 0.0
 
         # Phase 1: CLOSE ENDED
-        # if feat_close and close_ended and spent_total < HEARTBEAT_BUDGET_S:
-        if feat_close and close_ended :
+        if feat_close and close_ended:
             t0 = perf_counter()
             try:
                 close_ended()
@@ -358,7 +419,6 @@ def tick_once():
             logger.warning("[Heartbeat] scrape_sources skipped (no valid eBay token)")
 
         # Phase 3: COMPS
-        #if feat_comps and spent_total < HEARTBEAT_BUDGET_S and run_comps:
         if feat_comps and run_comps:
             t0 = perf_counter()
             try:
@@ -367,15 +427,16 @@ def tick_once():
                 logger.info(f"[Heartbeat] process.comps OK in {phase_dt:.2f}s")
             except Exception as e:
                 phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}")
+                logger.error(
+                    f"[Heartbeat] process.comps FAILED in {phase_dt:.2f}s: {e}"
+                )
             spent_total += phase_dt
 
         # Phase 3.5: ATTRIBUTES BACKFILL
-        #if feat_attrs and backfill_attrs and spent_total < HEARTBEAT_BUDGET_S:
         if feat_attrs and backfill_attrs:
             t0 = perf_counter()
             try:
-                backfill_attrs(limit=ATTR_BACKFILL_LIMIT, enable_api=True)
+                backfill_attrs(limit=ATTR_BACKFILL_LIMIT, enable_api=ALLOW_EBAY_API)
                 phase_dt = perf_counter() - t0
                 logger.info(
                     f"[Heartbeat] attrs_backfill (limit={ATTR_BACKFILL_LIMIT}) OK in {phase_dt:.2f}s"
@@ -387,24 +448,21 @@ def tick_once():
                 )
             spent_total += phase_dt
 
-        '''
-        # Phase 4: HOT LISTINGS
-        #if feat_hot and hot_listings and spent_total < HEARTBEAT_BUDGET_S:
-        if feat_hot and hot_listings :
-            t0 = perf_counter()
-            try:
-                hot_listings()
-                phase_dt = perf_counter() - t0
-                logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
-            except Exception as e:
-                phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}")
-            spent_total += phase_dt
-        '''
+        # Phase 4: HOT LISTINGS (currently commented out in your version)
+        # if feat_hot and hot_listings:
+        #     t0 = perf_counter()
+        #     try:
+        #         hot_listings()
+        #         phase_dt = perf_counter() - t0
+        #         logger.info(f"[Heartbeat] hot_listings OK in {phase_dt:.2f}s")
+        #     except Exception as e:
+        #         phase_dt = perf_counter() - t0
+        #         logger.error(
+        #             f"[Heartbeat] hot_listings FAILED in {phase_dt:.2f}s: {e}"
+        #         )
+        #     spent_total += phase_dt
 
         # Phase 5: ROI
-        # if feat_roi and roi and spent_total < HEARTBEAT_BUDGET_S:
-        # if feat_roi and roi and spent_total:
         if feat_roi and roi:
             t0 = perf_counter()
             try:
@@ -417,9 +475,7 @@ def tick_once():
             spent_total += phase_dt
 
         # Phase 6: NEW LISTING ALERTS
-        #if feat_alerts and alert_new_listings and spent_total < HEARTBEAT_BUDGET_S:
-        if feat_alerts and alert_new_listings :
-
+        if feat_alerts and alert_new_listings:
             t0 = perf_counter()
             try:
                 alert_new_listings()
@@ -427,7 +483,9 @@ def tick_once():
                 logger.info(f"[Heartbeat] alert_new_listings OK in {phase_dt:.2f}s")
             except Exception as e:
                 phase_dt = perf_counter() - t0
-                logger.error(f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}")
+                logger.error(
+                    f"[Heartbeat] alert_new_listings FAILED in {phase_dt:.2f}s: {e}"
+                )
             spent_total += phase_dt
 
         total_dt = perf_counter() - start_wall

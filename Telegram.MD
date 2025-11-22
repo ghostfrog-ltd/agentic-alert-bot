@@ -1,4 +1,4 @@
-# Telegram Bot Setup Guide
+# Telegram Bot Setup Guide 
 
 This guide walks through setting up a Telegram bot for your project (e.g., GhostFrog Agentic Alert Bot).
 

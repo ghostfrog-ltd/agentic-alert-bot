@@ -194,7 +194,7 @@ def _load_candidates(limit: int) -> List[Tuple[int, str]]:
         SELECT id, external_id
         FROM auction_listings
         WHERE source LIKE 'ebay%%'
-          AND status IN ('live', 'OPEN')
+          AND status IN ('live', 'open')
           AND external_id IS NOT NULL
           AND raw_attrs IS NULL
         ORDER BY id DESC

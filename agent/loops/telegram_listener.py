@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 
 from agent.actions.telegram.hot_listings import build_hot_listings_message
 from agent.actions.telegram.roi_summary import build_roi_message
-
 from infrastructure.adapters.telegram import TelegramAdapter
 from infrastructure.utils.logger import get_logger
+from infrastructure.db import schema
 
 logger = get_logger(__name__)
 
@@ -17,6 +17,22 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------
+
+def mark_time_expired_as_ended() -> int:
+    """
+    Anything beyond its scheduled end time is no longer live.
+    """
+    conn = schema.get_fresh_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE auction_listings
+               SET status = 'ended'
+             WHERE status = 'live'
+               AND end_time <= NOW();
+            """
+        )
+        return cur.rowcount
 
 def handle_hot_command(adapter: TelegramAdapter, chat_id: int) -> None:
     """
@@ -85,9 +101,11 @@ def main() -> None:
                 adapter.send_message("🐸 Pong from GhostFrog HQ!", chat_id=chat_id)
 
             elif text == "/hot":
+                mark_time_expired_as_ended()
                 handle_hot_command(adapter, chat_id)
 
             elif text.startswith("/roi"):
+                mark_time_expired_as_ended()
                 handle_roi_command(adapter, chat_id, text)
 
             elif text == "/stats":

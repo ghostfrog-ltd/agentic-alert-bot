@@ -656,11 +656,15 @@ def bulk_append_price_history(rows: list[tuple[str, int, int]]):
 def bulk_upsert_auction_listings(rows: list[dict]):
     """
     Bulk upsert of listings data from scrapers.
+    Scraper semantics:
+      - Every call represents "we have just seen these listings as ACTIVE on eBay".
+      - This is the ONLY place that should bump last_seen_at.
     """
     if not rows:
         return
 
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    # Consistent "seen alive" timestamp for this batch
+    now = datetime.now(timezone.utc)
 
     for r in rows:
         # If end_time is missing → fabricate 1 day future end
@@ -668,11 +672,35 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             r["end_time"] = now + timedelta(days=1)
 
     cols = [
-        "source", "external_id", "title", "price_current", "bids_count", "end_time",
-        "url", "detail_url", "sale_type", "roi_estimate", "max_bid", "notes",
-        "source_id", "model_key", "time_left_s", "status"
+        "source",
+        "external_id",
+        "title",
+        "price_current",
+        "bids_count",
+        "end_time",
+        "url",
+        "detail_url",
+        "sale_type",
+        "roi_estimate",
+        "max_bid",
+        "notes",
+        "source_id",
+        "model_key",
+        "time_left_s",
+        "status",
+        "last_seen_at",
     ]
-    values = [tuple(r.get(c) for c in cols) for r in rows]
+
+    values: list[tuple] = []
+    for r in rows:
+        row_vals: list[Any] = []
+        for c in cols:
+            if c == "last_seen_at":
+                # Always set "seen alive" to this batch timestamp
+                row_vals.append(now)
+            else:
+                row_vals.append(r.get(c))
+        values.append(tuple(row_vals))
 
     sql = f"""
         INSERT INTO auction_listings ({", ".join(cols)})
@@ -691,7 +719,8 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             source_id     = EXCLUDED.source_id,
             model_key     = COALESCE(EXCLUDED.model_key,     auction_listings.model_key),
             time_left_s   = COALESCE(EXCLUDED.time_left_s,   auction_listings.time_left_s),
-            status        = COALESCE(EXCLUDED.status,        auction_listings.status)
+            status        = COALESCE(EXCLUDED.status,        auction_listings.status),
+            last_seen_at  = EXCLUDED.last_seen_at
     """
     conn = get_connection()  # Always get a live connection
     with conn, conn.cursor() as cur:

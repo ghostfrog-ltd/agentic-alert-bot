@@ -217,7 +217,7 @@ def main():
             "source_id": source_id,
             "model_key": None,
             "time_left_s": None,
-            "status": "OPEN",
+            "status": "live",
         })
 
     if rows:

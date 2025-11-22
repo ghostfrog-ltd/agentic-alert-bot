@@ -14,6 +14,20 @@ from infrastructure.db import schema
 logger = get_logger(__name__)
 
 
+def env_flag(name: str, default: str = "0") -> bool:
+    """
+    Simple env helper: "1/true/yes/on" => True, everything else => False.
+    """
+    val = os.getenv(name, default)
+    if val is None:
+        return False
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+# Per-env toggle: should this process actually run the Telegram listener?
+TELEGRAM_BOT_ENABLED = env_flag("GF_ENABLE_TELEGRAM_BOT", "1")
+
+
 # ---------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------
@@ -33,6 +47,7 @@ def mark_time_expired_as_ended() -> int:
             """
         )
         return cur.rowcount
+
 
 def handle_hot_command(adapter: TelegramAdapter, chat_id: int) -> None:
     """
@@ -76,6 +91,12 @@ def handle_roi_command(adapter: TelegramAdapter, chat_id: int, text: str) -> Non
 
 def main() -> None:
     load_dotenv()
+
+    if not TELEGRAM_BOT_ENABLED:
+        logger.info(
+            "[telegram] GF_ENABLE_TELEGRAM_BOT=0 – Telegram listener disabled for this env"
+        )
+        return
 
     adapter = TelegramAdapter.from_env()
     logger.info("🐸 Starting Telegram listener loop…")

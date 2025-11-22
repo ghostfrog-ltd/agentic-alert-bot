@@ -2,126 +2,102 @@
 
 ### Create file
 
+From File local filesystem make: run_gf_heartbeat-prod.sh
+```
+#!/bin/bash
+set -euo pipefail
+
+LOGFILE="$HOME/ghostfrog_heartbeat_wrapper.log"
+
+echo "[$(date)] Wrapper starting…" >> "$LOGFILE"
+
+TARGET="/Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod/bin/python"
+
+# Wait until Bob & python exist (max ~2 minutes)
+for i in {1..60}; do
+  if [ -x "$TARGET" ]; then
+    echo "[$(date)] Found $TARGET, starting heartbeat…" >> "$LOGFILE"
+    break
+  fi
+  echo "[$(date)] $TARGET not found yet, retry $i…" >> "$LOGFILE"
+  sleep 2
+done
+
+if [ ! -x "$TARGET" ]; then
+  echo "[$(date)] ERROR: $TARGET still not found after retries, exiting 78" >> "$LOGFILE"
+  exit 78
+fi
+
+# Go to project dir on Bob
+cd /Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod
+
+# Load .env if present
+if [ -f ".env" ]; then
+  echo "[$(date)] Loading .env…" >> "$LOGFILE"
+  export $(grep -v '^[[:space:]]*#' .env | grep -v '^[[:space:]]*$' | xargs) || true
+fi
+
+# Run the working command exactly as you do manually
+echo "[$(date)] Exec heartbeat now…" >> "$LOGFILE"
+exec /Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod/bin/python app.py heartbeat
+
 ```
 
-~/Library/LaunchAgents/com.ghostfrog.prod.plist
+also make:
 
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.ghostfrog.prod</string>
+```
+#!/bin/bash
 
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/bin/python3</string>
-      <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod/app.py</string>
-      <string>heartbeat</string>
-    </array>
+PLIST="$HOME/Library/LaunchAgents/com.ghostfrog.prod.plist"
+LABEL="com.ghostfrog.agentic-alert-bot-prod"
 
-    <key>WorkingDirectory</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod</string>
+case "$1" in
+  start)
+    echo "🚀 Starting PROD GhostFrog…"
+    launchctl bootstrap gui/$UID "$PLIST"
+    launchctl kickstart -k gui/$UID/$LABEL
+    ;;
 
-    <key>StandardOutPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod/heartbeat.log</string>
+  stop)
+    echo "🛑 Stopping PROD GhostFrog…"
+    launchctl bootout gui/$UID "$PLIST" 2>/dev/null
+    ;;
 
-    <key>StandardErrorPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-prod/heartbeat.err</string>
+  restart)
+    echo "🔄 Restarting PROD GhostFrog…"
+    launchctl bootout gui/$UID "$PLIST" 2>/dev/null
+    launchctl bootstrap gui/$UID "$PLIST"
+    launchctl kickstart -k gui/$UID/$LABEL
+    ;;
 
-    <key>RunAtLoad</key>
-    <true/>
+  status)
+    echo "📡 Status:"
+    launchctl list | grep "$LABEL" && tail -n 5 "$HOME/ghostfrog_heartbeat_wrapper.log"
+    ;;
 
-    <key>KeepAlive</key>
-    <true/>
-  </dict>
-</plist>
+  *)
+    echo "Usage: gf-prod {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+```
 
-~/Library/LaunchAgents/com.ghostfrog.dev.plist
+add to path (the location of the files)
 
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.ghostfrog.dev</string>
-
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/bin/python3</string>
-      <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-dev/app.py</string>
-      <string>heartbeat</string>
-    </array>
-
-    <key>WorkingDirectory</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-dev</string>
-
-    <key>StandardOutPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-dev/heartbeat.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-dev/heartbeat.err</string>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-  </dict>
-</plist>
-
-~/Library/LaunchAgents/com.ghostfrog.bob.plist
-
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.ghostfrog.bob</string>
-
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/bin/python3</string>
-      <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-bob/app.py</string>
-      <string>heartbeat</string>
-    </array>
-
-    <key>WorkingDirectory</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-bob</string>
-
-    <key>StandardOutPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-bob/heartbeat.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Volumes/Bob/www/ghostfrog-agentic-alert-bot-bob/heartbeat.err</string>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-  </dict>
-</plist>
+```
+echo 'export PATH="$HOME/sites:$PATH"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 ### LOAD AND START
 
-# unload old ones if they exist
-launchctl unload ~/Library/LaunchAgents/com.ghostfrog.prod.plist 2>/dev/null || true
-launchctl unload ~/Library/LaunchAgents/com.ghostfrog.dev.plist 2>/dev/null || true
-launchctl unload ~/Library/LaunchAgents/com.ghostfrog.bob.plist 2>/dev/null || true
+then we can run
 
-# load new configs
-launchctl load  ~/Library/LaunchAgents/com.ghostfrog.prod.plist
-launchctl load  ~/Library/LaunchAgents/com.ghostfrog.dev.plist
-launchctl load  ~/Library/LaunchAgents/com.ghostfrog.bob.plist
-
-# start them
-launchctl start com.ghostfrog.prod
-launchctl start com.ghostfrog.dev
-launchctl start com.ghostfrog.bob
-
-
+```
+gf-prod status
+gf-dev restart
+gf-bob stop
+```
 
 ### Check its listed
 
@@ -132,7 +108,6 @@ launchctl list | grep ghostfrog
 cat /Users/garyconstable/sites/ghostfrog-agentic-alert-bot/heartbeat.log
 cat /Users/garyconstable/sites/ghostfrog-agentic-alert-bot/heartbeat.err
 
-
 # PIP
 
 ### install a package
@@ -142,7 +117,6 @@ source bin/activate
 pip install lxml         
 pip freeze > requirements.txt
 ```
-
 
 ### Install from txt file
 ```

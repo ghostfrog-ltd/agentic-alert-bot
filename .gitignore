@@ -10,3 +10,6 @@ lib/
 heartbeat.err
 heartbeat.log
 logs
+
+ai/old/*
+ai/data/*

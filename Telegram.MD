@@ -4,7 +4,7 @@ This guide walks through setting up a Telegram bot for your project (e.g., Ghost
 
 ---
 
-## 🧩 1. Create the Telegram Bot
+## 🧩 1. Create the Telegram Bot 
 
 1. Open Telegram and search for **@BotFather**.
 2. Start a chat and send the command:

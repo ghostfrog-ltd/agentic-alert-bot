@@ -1,0 +1,373 @@
+# <!-- GF UI Template -->
+
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GhostFrog · Bob &amp; Chad Console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background-color: #050509;
+      color: #e5e7eb;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .app {
+      width: 100%;
+      max-width: 900px;
+      height: 90vh;
+      border-radius: 16px;
+      border: 1px solid #27272f;
+      background: radial-gradient(circle at top, #111827, #020617 55%);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.75);
+    }
+    .app-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid #27272f;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: linear-gradient(to right, #0f172a, #020617);
+    }
+    .app-header-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .logo {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 30% 20%, #4ade80, #22c55e 40%, #15803d 80%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      font-weight: 700;
+      color: #022c22;
+      box-shadow: 0 0 15px rgba(34, 197, 94, 0.75);
+    }
+    .title {
+      font-size: 15px;
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .app-body {
+      flex: 1;
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .message-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .message-row.user {
+      justify-content: flex-end;
+    }
+    .avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: #111827;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      flex-shrink: 0;
+    }
+    .avatar.user {
+      background: #1d4ed8;
+      color: #e5e7eb;
+    }
+    .avatar.bot {
+      background: #064e3b;
+      color: #a7f3d0;
+    }
+    .bubble {
+      max-width: 70%;
+      padding: 10px 12px;
+      border-radius: 14px;
+      font-size: 14px;
+      line-height: 1.4;
+      border: 1px solid transparent;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+      white-space: pre-wrap; /* preserve newlines for code previews */
+    }
+    .bubble.user {
+      background: #1d4ed8;
+      border-color: #1d4ed8;
+      color: #e5e7eb;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.bot {
+      background: #020617;
+      border-color: #1f2937;
+      color: #e5e7eb;
+      border-bottom-left-radius: 4px;
+    }
+    .message-meta {
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 3px;
+    }
+    .app-footer {
+      border-top: 1px solid #27272f;
+      padding: 10px 12px;
+      background: radial-gradient(circle at bottom, #020617, #020617 30%, #020617);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .input {
+      flex: 1;
+      border-radius: 999px;
+      background: #020617;
+      border: 1px solid #374151;
+      padding: 8px 14px;
+      font-size: 14px;
+      color: #e5e7eb;
+      outline: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .input input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: inherit;
+      font-size: inherit;
+    }
+    .input input::placeholder {
+      color: #6b7280;
+    }
+    .send-btn {
+      border-radius: 999px;
+      border: none;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      background: linear-gradient(to right, #22c55e, #16a34a);
+      color: #022c22;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 12px 30px rgba(34, 197, 94, 0.45);
+    }
+    .send-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+      box-shadow: none;
+    }
+    .send-icon {
+      font-size: 13px;
+    }
+    .hint {
+      font-size: 11px;
+      color: #6b7280;
+      text-align: left;
+      padding: 0 4px;
+    }
+    .hint span {
+      color: #9ca3af;
+    }
+    .badge {
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      border: 1px solid #4b5563;
+      color: #9ca3af;
+      background: rgba(15, 23, 42, 0.8);
+    }
+    .tagline {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    @media (max-width: 640px) {
+      .app {
+        border-radius: 0;
+        height: 100vh;
+      }
+      .bubble {
+        max-width: 80%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <div class="app-header-left">
+        <div class="logo">GF</div>
+        <div>
+          <div class="title">GhostFrog · Bob &amp; Chad Console</div>
+          <div class="subtitle">
+            Data root: <span style="color:#a5b4fc;">/ai/data</span> · Queue: <code>/ai/data/queue</code>
+          </div>
+        </div>
+      </div>
+      <div class="tagline">
+        <span class="badge">Local</span>
+        <span>Bob thinks, Chad writes, you watch.</span>
+      </div>
+    </header>
+
+    <main id="chat" class="app-body">
+      <div class="message-row bot">
+        <div class="avatar bot">B</div>
+        <div>
+          <div class="bubble bot">
+            Hey, I'm <strong>Bob</strong>, your cloud reasoner.<br/>
+            I talk to <strong>Chad</strong> (local coder) via files in <code>/ai/data/queue</code>.<br/>
+            Type something and I'll plan it, Chad will "execute", and we'll both leave messages.
+          </div>
+          <div class="message-meta">Bob · ready</div>
+        </div>
+      </div>
+    </main>
+
+    <footer class="app-footer">
+      <form id="chat-form" class="input-row">
+        <div class="input">
+          <input
+            id="chat-input"
+            type="text"
+            autocomplete="off"
+            placeholder="Ask for a change, e.g. “Make a plan to refactor the alert bot CLI.”"
+          />
+        </div>
+        <button id="send-btn" class="send-btn" type="submit">
+          <span class="send-icon">➤</span>
+          Send
+        </button>
+      </form>
+      <div class="hint">
+        Every message creates <span>.user.txt</span>, <span>.plan.json</span>, and <span>.exec.json</span> in
+        <code>/ai/data/queue</code>, plus a scratch file in <code>/ai/data/scratch</code>.
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const chatEl = document.getElementById("chat");
+    const formEl = document.getElementById("chat-form");
+    const inputEl = document.getElementById("chat-input");
+    const sendBtn = document.getElementById("send-btn");
+
+    function appendMessage(role, text) {
+      const row = document.createElement("div");
+      row.className = "message-row " + (role === "user" ? "user" : "bot");
+
+      const avatar = document.createElement("div");
+      avatar.className = "avatar " + (role === "user" ? "user" : "bot");
+      if (role === "user") {
+        avatar.textContent = "You";
+      } else if (role === "bob") {
+        avatar.textContent = "B";
+      } else if (role === "chad") {
+        avatar.textContent = "C";
+      } else {
+        avatar.textContent = "⋯";
+      }
+
+      const contentWrap = document.createElement("div");
+      const bubble = document.createElement("div");
+      bubble.className = "bubble " + (role === "user" ? "user" : "bot");
+      bubble.textContent = text;
+
+      const meta = document.createElement("div");
+      meta.className = "message-meta";
+      if (role === "user") {
+        meta.textContent = "You";
+      } else if (role === "bob") {
+        meta.textContent = "Bob";
+      } else if (role === "chad") {
+        meta.textContent = "Chad";
+      } else {
+        meta.textContent = "System";
+      }
+
+      contentWrap.appendChild(bubble);
+      contentWrap.appendChild(meta);
+
+      if (role === "user") {
+        row.appendChild(contentWrap);
+        row.appendChild(avatar);
+      } else {
+        row.appendChild(avatar);
+        row.appendChild(contentWrap);
+      }
+
+      chatEl.appendChild(row);
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    async function sendCommand(message) {
+      sendBtn.disabled = true;
+      appendMessage("bob", "Bob: thinking…");
+
+      try {
+        const resp = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message })
+        });
+        const data = await resp.json();
+
+        const msgs = data.messages || [];
+        msgs.forEach(m => {
+          appendMessage(m.role || "bob", m.text || "");
+        });
+      } catch (err) {
+        appendMessage("bob", "Error talking to Bob/Chad middleware.");
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    formEl.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = (inputEl.value || "").trim();
+      if (!text) return;
+      appendMessage("user", text);
+      inputEl.value = "";
+      sendCommand(text);
+    });
+  </script>
+</body>
+</html>

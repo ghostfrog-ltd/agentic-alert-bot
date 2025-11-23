@@ -1014,21 +1014,28 @@ def run(limit_output: int = 20) -> List[Opportunity]:
                 newly_created.append(op)
 
     if SEND_EMAIL_DIGEST and newly_created:
-        last_sent = get_alert_last_sent(ALERT_NAME)
-        if last_sent is None:
-            _send_email_digest(newly_created)
+        # Filter newly_created to only those with end_time before now
+        now = _now_utc()
+        newly_created = [op for op in newly_created if op.end_time is not None and op.end_time < now]
+
+        if not newly_created:
+            logger.info("[roi_listings] no newly created opportunities with past end_time to email")
         else:
-            last_sent_aware = _to_aware_utc(last_sent)
-            if last_sent_aware is None:
+            last_sent = get_alert_last_sent(ALERT_NAME)
+            if last_sent is None:
                 _send_email_digest(newly_created)
             else:
-                since = _now_utc() - last_sent_aware
-                if since >= EMAIL_COOLDOWN:
+                last_sent_aware = _to_aware_utc(last_sent)
+                if last_sent_aware is None:
                     _send_email_digest(newly_created)
                 else:
-                    logger.info(
-                        "[roi_listings] skipping email (cooldown %.0f min not reached)",
-                        EMAIL_COOLDOWN.total_seconds() / 60.0,
-                    )
+                    since = _now_utc() - last_sent_aware
+                    if since >= EMAIL_COOLDOWN:
+                        _send_email_digest(newly_created)
+                    else:
+                        logger.info(
+                            "[roi_listings] skipping email (cooldown %.0f min not reached)",
+                            EMAIL_COOLDOWN.total_seconds() / 60.0,
+                        )
 
     return opps

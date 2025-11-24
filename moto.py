@@ -124,7 +124,7 @@ def bulk_upsert_auction_listings(rows: list[dict]):
 
     cols = [
         "source", "external_id", "title", "price_current", "bids_count", "end_time",
-        "url", "detail_url", "sale_type", "roi_estimate", "max_bid", "notes",
+        "url", "sale_type", "roi_estimate", "max_bid", "notes",
         "source_id", "model_key", "time_left_s", "status"
     ]
     values = [tuple(r.get(c) for c in cols) for r in rows]
@@ -138,7 +138,6 @@ def bulk_upsert_auction_listings(rows: list[dict]):
             bids_count    = COALESCE(EXCLUDED.bids_count,    auction_listings.bids_count),
             end_time      = COALESCE(EXCLUDED.end_time,      auction_listings.end_time),
             url           = EXCLUDED.url,
-            detail_url    = EXCLUDED.detail_url,
             sale_type     = EXCLUDED.sale_type,
             roi_estimate  = EXCLUDED.roi_estimate,
             max_bid       = EXCLUDED.max_bid,
@@ -191,8 +190,8 @@ def main():
             remaining = interval - elapsed
             next_time = last_scraped + timedelta(seconds=interval)
             logger.info(
+                f"[{domain}] gated  next run at {next_time.strftime('%H:%M:%S')} "
                 f"[{domain}] gated → next run at {next_time.strftime('%H:%M:%S')} "
-                f"(in {int(remaining//60)}m {int(remaining%60)}s)"
             )
             return
 
@@ -209,7 +208,6 @@ def main():
             "bids_count": None,
             "end_time": None,
             "url": it["url"],
-            "detail_url": it["url"],
             "sale_type": "auction",
             "roi_estimate": None,
             "max_bid": None,

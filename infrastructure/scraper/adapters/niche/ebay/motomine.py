@@ -139,7 +139,7 @@ def _bulk_upsert_auction_listings(rows: List[Dict[str, Any]]) -> int:
     Bulk upsert of listings data from scrapers.
     Expects keys:
       source, external_id, title, price_current, bids_count, end_time,
-      url, detail_url, sale_type, roi_estimate, max_bid, notes,
+      url, sale_type, roi_estimate, max_bid, notes,
       source_id, model_key, time_left_s, status
     """
     if not rows:
@@ -158,7 +158,7 @@ def _bulk_upsert_auction_listings(rows: List[Dict[str, Any]]) -> int:
 
     cols = [
         "source", "external_id", "title", "price_current", "bids_count", "end_time",
-        "url", "detail_url", "sale_type", "roi_estimate", "max_bid", "notes",
+        "url", "sale_type", "roi_estimate", "max_bid", "notes",
         "source_id", "model_key", "time_left_s", "status"
     ]
     values = [tuple(r.get(c) for c in cols) for r in rows]
@@ -172,7 +172,6 @@ def _bulk_upsert_auction_listings(rows: List[Dict[str, Any]]) -> int:
             bids_count    = COALESCE(EXCLUDED.bids_count,    auction_listings.bids_count),
             end_time      = COALESCE(EXCLUDED.end_time,      auction_listings.end_time),
             url           = EXCLUDED.url,
-            detail_url    = EXCLUDED.detail_url,
             sale_type     = EXCLUDED.sale_type,
             roi_estimate  = EXCLUDED.roi_estimate,
             max_bid       = EXCLUDED.max_bid,
@@ -250,7 +249,6 @@ class Adapter:
                     "bids_count": None,
                     "end_time": scrape_ts + default_duration,
                     "url": it["url"],
-                    "detail_url": it["url"],
                     "sale_type": "auction",
                     "roi_estimate": None,
                     "max_bid": None,

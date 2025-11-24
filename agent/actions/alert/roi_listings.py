@@ -64,6 +64,9 @@ ENDGAME_WINDOW: timedelta = timedelta(hours=1)
 ENDGAME_MIN_ROI: float = 0.25  # only spam if still a decent deal
 ENDGAME_MIN_PROFIT_GBP: float = 50.0
 
+# Siren cooldown: at most one siren email per listing per 5 minutes
+SIREN_COOLDOWN: timedelta = timedelta(minutes=5)
+
 # --------------------------------
 # Alert / email behaviour
 # --------------------------------
@@ -562,6 +565,28 @@ def _record_roi_snapshot(cur, op: Opportunity) -> None:
     )
 
 
+def _marker_last_created_at(
+        cur,
+        external_id: str,
+        marker: str,
+) -> Optional[datetime]:
+    """
+    Return the last created_at timestamp for (external_id, marker), if any.
+    Used for cooldown logic (e.g. siren emails).
+    """
+    cur.execute(
+        """
+        SELECT created_at
+        FROM roi_alert_markers
+        WHERE external_id = %s AND marker = %s
+        LIMIT 1
+        """,
+        (external_id, marker),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _marker_exists(cur, external_id: str, marker: str) -> bool:
     cur.execute(
         "SELECT 1 FROM roi_alert_markers WHERE external_id=%s AND marker=%s",
@@ -573,9 +598,10 @@ def _marker_exists(cur, external_id: str, marker: str) -> bool:
 def _insert_marker(cur, external_id: str, marker: str) -> None:
     cur.execute(
         """
-        INSERT INTO roi_alert_markers (external_id, marker)
-        VALUES (%s, %s)
-        ON CONFLICT (external_id, marker) DO NOTHING
+        INSERT INTO roi_alert_markers (external_id, marker, created_at)
+        VALUES (%s, %s, (now() AT TIME ZONE 'utc'))
+        ON CONFLICT (external_id, marker) DO UPDATE
+            SET created_at = EXCLUDED.created_at
         """,
         (external_id, marker),
     )
@@ -631,8 +657,11 @@ def _send_bucket_email(op: Opportunity, bucket: int, time_left_str: str) -> None
 
 def _send_siren_email(op: Opportunity, time_left_str: str) -> None:
     """
-    High-noise siren: intentionally *no* dedupe.
-    Will fire every heartbeat during ENDGAME_WINDOW while ROI/profit are above thresholds.
+    Siren alert email.
+
+    Actual dedupe / cooldown behaviour is handled by _process_roi_alerts
+    using roi_alert_markers + SIREN_COOLDOWN. This function just sends
+    the email for a single opportunity.
     """
     from infrastructure.utils.emailer import send_email  # local import
 
@@ -664,6 +693,12 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
       - fire one-shot "new_high" alert when it's insanely good
       - fire one-shot bucket alerts as ROI crosses 25%/50%/75%/100%/...
       - spam siren alerts every heartbeat in the last ENDGAME_WINDOW
+
+    IMPORTANT:
+      - We *always* record snapshots, even for ended listings.
+      - We only send per-listing emails (new_high / bucket / siren)
+        for listings that have NOT yet ended (end_time > now).
+        This prevents "Ends in: expired" emails.
     """
     if not opps:
         return
@@ -679,7 +714,7 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
             _ensure_support_tables(cur)
 
             for op in opps:
-                # Snapshot every run for time-series analysis
+                # 1) Snapshot every run for time-series analysis
                 try:
                     _record_roi_snapshot(cur, op)
                 except Exception as e:
@@ -689,17 +724,36 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
                         e,
                     )
 
+                # Normalise end_time to aware UTC
                 end_time = _to_aware_utc(op.end_time) if op.end_time else None
+
+                # 2) If we know the listing has already ended,
+                #    DO NOT send any of the per-listing emails.
+                #    (We still recorded the snapshot above.)
+                if end_time is not None and end_time <= now:
+                    continue
+
+                # From here on, emails are only for still-live listings
                 time_left_str = _humanise_time_left(end_time)
 
-                # 1) NEW insane item (no explicit "new" check, but markers make it one-shot)
+                # Extra safety: if the listing literally ended in the tiny window
+                # between our earlier `now` check and _humanise_time_left(),
+                # don't send any per-listing emails.
+                if time_left_str == "expired":
+                    logger.debug(
+                        "[roi_listings] skipping alerts for %s (became expired during processing)",
+                        op.external_id,
+                    )
+                    continue
+
+                # 3) NEW insane item (one-shot via markers)
                 if op.profit >= NEW_HIGH_PROFIT_GBP and op.roi >= NEW_HIGH_ROI:
                     marker = "new_high"
                     if not _marker_exists(cur, op.external_id, marker):
                         _insert_marker(cur, op.external_id, marker)
                         _send_new_high_email(op, time_left_str)
 
-                # 2) Bucket milestones (25%, 50%, 75%, 100%, ...)
+                # 4) Bucket milestones (25%, 50%, 75%, 100%, ...)
                 if op.profit >= MIN_PROFIT_GBP and op.roi >= MIN_ROI:
                     bucket = int(op.roi // BUCKET_STEP)
                     marker = f"bucket_{bucket}"
@@ -707,14 +761,27 @@ def _process_roi_alerts(opps: List[Opportunity]) -> None:
                         _insert_marker(cur, op.external_id, marker)
                         _send_bucket_email(op, bucket, time_left_str)
 
-                # 3) Last-hour spam (no markers, intentionally noisy)
+                # 5) Last-hour siren, but at most one email per SIREN_COOLDOWN
                 if end_time is not None:
                     if (
                         end_time - now <= ENDGAME_WINDOW
                         and op.profit >= ENDGAME_MIN_PROFIT_GBP
                         and op.roi >= ENDGAME_MIN_ROI
                     ):
-                        _send_siren_email(op, time_left_str)
+                        marker = "siren"
+                        last_siren = _marker_last_created_at(cur, op.external_id, marker)
+
+                        allowed = False
+                        if last_siren is None:
+                            allowed = True
+                        else:
+                            last_siren_aware = _to_aware_utc(last_siren)
+                            if last_siren_aware is None or (now - last_siren_aware) >= SIREN_COOLDOWN:
+                                allowed = True
+
+                        if allowed:
+                            _insert_marker(cur, op.external_id, marker)
+                            _send_siren_email(op, time_left_str)
 
         conn.commit()
     except Exception as e:

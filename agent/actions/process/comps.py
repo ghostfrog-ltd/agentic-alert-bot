@@ -19,7 +19,7 @@ connection = db_connection.connection
 COMPS_WINDOW_DAYS: int = 30          # how many days of history to aggregate
 COMPS_MIN_INTERVAL_HOURS: int = 6   # minimum time between full recomputes
 COMPS_KEEP_PER_KEY: int = 60         # how many snapshots per model_key to retain
-NO_KEY_BUCKET: str = "no_key"        # synthetic key for rows with model_key IS NULL
+NO_KEY_BUCKET: str = "unknown"        # synthetic key for rows with model_key IS NULL
 
 
 # ---------------------------------
@@ -89,7 +89,7 @@ def _compute_daily_comps(days: Optional[int] = None) -> None:
 
     - Uses COALESCE(final_price, price_current) as the realized sale price.
     - Groups by COALESCE(model_key, NO_KEY_BUCKET), so rows with model_key IS NULL
-      are aggregated into a synthetic 'no_key' bucket.
+      are aggregated into a synthetic 'unknown' bucket.
     - Uses a configurable time window:
         - default COMPS_WINDOW_DAYS, or
         - override via GF_COMPS_WINDOW_DAYS env var, or

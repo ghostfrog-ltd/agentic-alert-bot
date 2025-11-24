@@ -665,6 +665,14 @@ def bulk_upsert_auction_listings(rows: list[dict]):
     # Consistent "seen alive" timestamp for this batch
     now = datetime.now(timezone.utc)
 
+    # How long before a "live" listing is treated as stale/ended if we stop seeing it.
+    # Default: 180 minutes (3 hours), override with GF_LISTING_STALE_MINUTES if needed.
+    try:
+        stale_minutes = int(os.getenv("GF_LISTING_STALE_MINUTES", "180"))
+    except Exception:
+        stale_minutes = 180
+    stale_cutoff = now - timedelta(minutes=stale_minutes)
+
     for r in rows:
         # If end_time is missing → fabricate 1 day future end
         if not r.get("end_time"):
@@ -723,4 +731,19 @@ def bulk_upsert_auction_listings(rows: list[dict]):
     with conn, conn.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("SET LOCAL synchronous_commit TO OFF;")
+
+        # 1) Upsert this batch – everything in here is "seen alive" right now
         execute_values(cur, sql, values, page_size=250)
+
+        # 2) Any listing that *used* to be live but hasn't been seen for a while
+        #    is almost certainly ended (BIN hit, auction ended, cancelled, etc).
+        #    We mark it as 'stale' so ROI / alerts can ignore it.
+        cur.execute(
+            """
+            UPDATE auction_listings
+            SET status = 'stale'
+            WHERE status = 'live'
+              AND last_seen_at < %s
+            """,
+            (stale_cutoff,),
+        )

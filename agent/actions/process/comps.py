@@ -16,20 +16,24 @@ connection = db_connection.connection
 # Tunable knobs
 # ---------------------------------
 # Default logical window; can be overridden at runtime via GF_COMPS_WINDOW_DAYS
-COMPS_WINDOW_DAYS: int = 30          # how many days of history to aggregate
-COMPS_MIN_INTERVAL_HOURS: int = 6   # minimum time between full recomputes
-COMPS_KEEP_PER_KEY: int = 60         # how many snapshots per model_key to retain
-NO_KEY_BUCKET: str = "unknown"        # synthetic key for rows with model_key IS NULL
+COMPS_WINDOW_DAYS: int = 30           # how many days of history to aggregate
+COMPS_MIN_INTERVAL_HOURS: int = 6     # minimum time between full recomputes
+COMPS_KEEP_PER_KEY: int = 60          # how many snapshots per model_key to retain
+
+# Legacy: we used to bucket NULL model_keys into "unknown".
+# We now avoid doing that for comps so we don't contaminate ROI.
+NO_KEY_BUCKET: str = "unknown"
 
 
 # ---------------------------------
 # Local DB helpers
 # ---------------------------------
 def _ensure_utc_session(cur) -> None:
+    """Best-effort session timezone to UTC (local helper)."""
     try:
         cur.execute("SET TIME ZONE 'UTC'")
     except Exception:
-        # Not fatal; best-effort
+        # Not fatal; best-effort only
         pass
 
 
@@ -85,30 +89,27 @@ def _truncate_comps() -> None:
 
 def _compute_daily_comps(days: Optional[int] = None) -> None:
     """
-    Insert new per-model_key stats for the last N days of sold listings.
+    Insert new per-model_key stats for the last N days of ended/sold listings.
 
     - Uses COALESCE(final_price, price_current) as the realized sale price.
-    - Groups by COALESCE(model_key, NO_KEY_BUCKET), so rows with model_key IS NULL
-      are aggregated into a synthetic 'unknown' bucket.
-    - Uses a configurable time window:
-        - default COMPS_WINDOW_DAYS, or
-        - override via GF_COMPS_WINDOW_DAYS env var, or
-        - explicit 'days' argument (if provided).
+    - Includes both 'sold' and 'ended' statuses.
+    - Only aggregates rows where model_key is non-null and not 'unknown'
+      to avoid contaminating comps with garbage buckets.
     """
     if days is None:
         days = _get_window_days()
 
     logger.info(
         "[process.comps] computing daily comps for last %s days "
-        "(model_key NULL → %r, price = COALESCE(final_price, price_current))",
+        "(statuses IN ('sold','ended'), model_key NOT NULL/unknown, "
+        "price = COALESCE(final_price, price_current))",
         days,
-        NO_KEY_BUCKET,
     )
 
     sql = """
         INSERT INTO comps (model_key, median_final_price, mean_final_price, samples, computed_at)
         SELECT
-            COALESCE(model_key, %s) AS model_key,
+            model_key,
             PERCENTILE_CONT(0.5) WITHIN GROUP (
                 ORDER BY COALESCE(final_price, price_current)
             )::numeric AS median_final_price,
@@ -116,15 +117,24 @@ def _compute_daily_comps(days: Optional[int] = None) -> None:
             COUNT(*)::int AS samples,
             (now() AT TIME ZONE 'utc') AS computed_at
         FROM auction_listings
-        WHERE status IN ('sold')
+        WHERE status IN ('sold', 'ended')
           AND COALESCE(final_price, price_current) IS NOT NULL
           AND end_time >= (now() AT TIME ZONE 'utc' - (%s || ' days')::interval)
-        GROUP BY COALESCE(model_key, %s)
+          AND model_key IS NOT NULL
+          AND LOWER(model_key) <> 'unknown'
+        GROUP BY model_key
     """
 
     with connection, connection.cursor() as cur:
         _ensure_utc_session(cur)
-        cur.execute(sql, (NO_KEY_BUCKET, str(days), NO_KEY_BUCKET))
+        cur.execute(sql, (str(days),))
+
+    # Debug: how many comps did we just insert?
+    with connection.cursor() as cur:
+        _ensure_utc_session(cur)
+        cur.execute("SELECT COUNT(*) FROM comps;")
+        (count_after,) = cur.fetchone()
+        logger.info("[process.comps] comps rows after compute_daily_comps = %s", count_after)
 
 
 def _prune_old_comps(keep_per_key: int = COMPS_KEEP_PER_KEY) -> None:
@@ -154,6 +164,7 @@ def _prune_old_comps(keep_per_key: int = COMPS_KEEP_PER_KEY) -> None:
 
 
 def refresh_latest_comps_matview():
+    """Refresh the latest_comps materialized view (best-effort)."""
     with connection, connection.cursor() as cur:
         ensure_utc_session(cur)
         cur.execute("REFRESH MATERIALIZED VIEW latest_comps")
@@ -174,6 +185,8 @@ def run(force: bool = False) -> None:
       - COMPS_WINDOW_DAYS by default
       - or GF_COMPS_WINDOW_DAYS env var if set to a positive integer
     """
+    logger.info("[process.comps] >>> USING NEW COMPS VERSION <<<")
+
     try:
         now_utc = datetime.now(timezone.utc)
 

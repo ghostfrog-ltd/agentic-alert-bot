@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from typing import Mapping, Any, Optional
+import re
+
+from infrastructure.utils.condition import _derive_condition_grade
 
 
 def _clean(v: Any) -> str:
@@ -16,96 +19,144 @@ def _num(v: Any) -> str:
     return "".join(ch for ch in str(v) if ch.isdigit())
 
 
-def _capacity_token(v: Any) -> str:
+def _extract_ipad_gen_token(attrs: Mapping[str, Any], title: str) -> str:
     """
-    Turn '256 GB', '512GB', '1 TB', '2tb', etc. into:
-      - '256gb'
-      - '512gb'
-      - '1tb'
-      - '2tb'
-    If we can't make sense of it, return "".
+    Detect iPad generations like '2nd Gen', '3rd Generation' etc.
+
+    Returns tokens 'gen1', 'gen2', ... or '' if nothing obvious is found.
+    We deliberately *don't* map years to gens – only explicit 'Xth gen'
+    phrases to avoid overfitting.
     """
-    if not v:
-        return ""
-    s = str(v).strip().lower().replace(" ", "")
-    if not s:
-        return ""
+    txt = " ".join(
+        s
+        for s in (
+            str(attrs.get("Model") or ""),
+            str(attrs.get("Product Line") or ""),
+            str(attrs.get("Series") or ""),
+            title or "",
+        )
+        if s
+    ).lower()
 
-    # Grab the first number we see
-    num = ""
-    for ch in s:
-        if ch.isdigit():
-            num += ch
-        elif num:
-            break
-
-    if not num:
+    if "ipad" not in txt:
         return ""
 
-    if "tb" in s:
-        return f"{num}tb"
-    return f"{num}gb"
+    # Normalise a bit
+    txt = txt.replace("-", " ")
+
+    patterns = [
+        (r"\b(1st|first)\s+gen(eration)?\b", "gen1"),
+        (r"\b(2nd|second)\s+gen(eration)?\b", "gen2"),
+        (r"\b(3rd|third)\s+gen(eration)?\b", "gen3"),
+        (r"\b(4th|fourth)\s+gen(eration)?\b", "gen4"),
+        (r"\b(5th|fifth)\s+gen(eration)?\b", "gen5"),
+        (r"\b(6th|sixth)\s+gen(eration)?\b", "gen6"),
+    ]
+    for pattern, token in patterns:
+        if re.search(pattern, txt):
+            return token
+
+    return ""
+
+
+def _extract_iphone_se_gen_suffix(attrs: Mapping[str, Any], title: str) -> str:
+    """
+    Very small helper: distinguish iPhone SE generations, since they share a name.
+
+    Returns suffixes like '-2016', '-2020', '-2022' or '' if unsure.
+    """
+    txt = " ".join(
+        s
+        for s in (
+            str(attrs.get("Model") or ""),
+            str(attrs.get("Product Line") or ""),
+            str(attrs.get("Series") or ""),
+            title or "",
+        )
+        if s
+    ).lower()
+
+    if "iphone se" not in txt:
+        return ""
+
+    # Year hints first (most sellers include the year)
+    if "2022" in txt or re.search(r"\b(3rd|third)\s+gen", txt):
+        return "-2022"
+    if "2020" in txt or re.search(r"\b(2nd|second)\s+gen", txt):
+        return "-2020"
+    if "2016" in txt or re.search(r"\b(1st|first)\s+gen", txt):
+        return "-2016"
+
+    return ""
 
 
 def apple_model_key(attrs: Mapping[str, Any], title: str = "") -> Optional[str]:
     """
-    ebay-apple boring version:
+    Apple model_key, console-style:
 
-    - Attrs only, ignore title.
-    - Brand must contain 'apple'.
-    - MacBooks: apple-macbook[-air|-pro]-<ram>-<storage>
-    - iPhones: apple-<iphone-model>-<storage>
-    - iPads: apple-<ipad-model>-<generation?>-<storage>
-    - Watches: apple-watch-...
-    - AirPods: apple-airpods / apple-airpodspro
-    - AirTag / Apple TV / HomePod: simple keys.
-    - Non-Apple -> None (let other helpers try).
-    - If nothing matches -> 'unknown'.
+    - Brand must contain "apple" -> otherwise return None (other helpers can handle).
+    - Macs are chip-family specific (M1/M2/M3/M4 vs Intel).
+    - iPads now include generation where explicitly stated (e.g. '2nd Gen').
+    - iPhone SE gets generation/years where obvious; other iPhones stay as before.
+
+    Examples:
+
+      Mac:
+        apple-macbook-pro-m1pro_b
+        apple-macbook-air-m2_a
+        apple-imac-intel_c
+        apple-mac-mini-m1_b
+        apple-mac-studio-m1max_a
+
+      iPad:
+        apple-ipad-pro-gen2_b
+        apple-ipad-pro-m1_a      (if you later choose to wire chip in)
+        apple-ipad-air-gen4_b
+        apple-ipad-mini_b
+
+      iPhone:
+        apple-iphone-13-pro_a
+        apple-iphone-se-2020_b
+
+      Watch / AirPods / etc unchanged.
+
+    - Final key is always: <base_family>_<grade> where grade ∈ {A,B,C,D}
+    - If clearly Apple but we can't classify → "unknown"
+    - If not clearly Apple → None
     """
 
     if not attrs:
         return "unknown"
 
-    # ------------------------------------------------------------------ #
-    # Brand gate
-    # ------------------------------------------------------------------ #
-    brand_raw = (
-        attrs.get("Brand")
-        or attrs.get("Marca")
-        or attrs.get("brand")
-    )
-    brand = _clean(brand_raw)
-    if "apple" not in brand:
+    # --------------------------------------------------------------
+    # Helpers
+    # --------------------------------------------------------------
+    def _with_grade(base_key: str) -> str:
+        grade = _derive_condition_grade(attrs, title)
+        return f"{base_key}_{grade}"
+
+    def _brand_is_apple() -> bool:
+        brand_raw = (
+            attrs.get("Brand")
+            or attrs.get("Marca")
+            or attrs.get("brand")
+        )
+        brand = _clean(brand_raw)
+        return "apple" in brand
+
+    if not _brand_is_apple():
+        # Let non-Apple items fall through to other model_key helpers
         return None
 
-    # ------------------------------------------------------------------ #
-    # Core fields
-    # ------------------------------------------------------------------ #
     series = _clean(attrs.get("Series") or "")
     product_line = _clean(attrs.get("Product Line") or "")
     model = _clean(attrs.get("Model") or "")
     product_family = _clean(attrs.get("Product Family") or "")
 
-    # "family" = best general category string
-    family = series or product_line or product_family
-
-    storage_token = _capacity_token(
-        attrs.get("Storage Capacity")
-        or attrs.get("storage")
-        or attrs.get("SSD Capacity")
-        or attrs.get("Hard Drive Capacity")
-        or attrs.get("Capacity")
+    family_blob = "-".join(
+        x for x in (series, product_line, product_family, model) if x
     )
 
-    ram_token = _capacity_token(
-        attrs.get("RAM")
-        or attrs.get("RAM Size")
-        or attrs.get("Memory")
-        or attrs.get("ram")
-    )
-
-    # chipset is still available if we ever want it, but we no longer
-    # put it in keys for MacBooks to avoid over-fragmentation
     chipset = _clean(
         attrs.get("Chipset Model")
         or attrs.get("Processor")
@@ -113,195 +164,255 @@ def apple_model_key(attrs: Mapping[str, Any], title: str = "") -> Optional[str]:
         or attrs.get("Processor Model")
     )
 
-    def _strip_apple_prefix(s: str) -> str:
-        return s[len("apple-"):] if s.startswith("apple-") else s
-
-    def _any_contains(needle: str) -> bool:
-        return (
-            needle in model
-            or needle in family
-            or needle in product_line
-            or needle in series
-            or needle in product_family
+    # Include title and chipset in a combined chip-source blob
+    chip_source = " ".join(
+        s for s in (
+            chipset,
+            attrs.get("Title") or "",
+            attrs.get("Item Title") or "",
+            title or "",
         )
+        if s
+    ).lower()
 
-    # ------------------------------------------------------------------ #
-    # MACBOOKS  (no CPU in key, just family + RAM + storage)
-    # ------------------------------------------------------------------ #
-    if "macbook" in family or "macbook" in model or "macbook" in product_family:
-        txt = "-".join(x for x in (family, model, product_family) if x)
+    def _chip_family() -> str:
+        """
+        For Macs, collapse CPU into:
+          - 'm1', 'm1pro', 'm1max', 'm1ultra',
+            'm2', 'm2pro', 'm2max', 'm2ultra',
+            'm3', 'm3pro', 'm3max',
+            'm4', 'm4pro', ...
+          - 'intel'
+          - 'applesilicon' (generic fallback if we only know "Apple Silicon")
+          - '' (unknown)
 
-        # Family
-        if "macbook-air" in txt:
-            line = "macbook-air"
-        elif "macbook-pro" in txt:
-            line = "macbook-pro"
-        else:
-            line = "macbook"
+        We *could* use this for iPads later (e.g. ipad-pro-m1), but for now
+        it is wired only into Mac families to avoid exploding key space.
+        """
+        c = chip_source
 
-        # Chipset family (m1/m2/m3 OR intel)
-        chip = chipset.lower()
-        chip_token = ""
+        # Specific M-series chip with optional tier: "M1", "M2 Pro", "M3 Max"
+        m = re.search(r"\bm(1|2|3|4|5)\s*(pro|max|ultra)?\b", c)
+        if m:
+            gen = m.group(1)
+            tier = (m.group(2) or "").strip().replace(" ", "")
+            if tier:
+                return f"m{gen}{tier}"   # e.g. m1pro, m2max
+            return f"m{gen}"            # e.g. m1, m2, m3, m4
 
-        if "m1" in chip:
-            chip_token = "m1"
-        elif "m2" in chip:
-            chip_token = "m2"
-        elif "m3" in chip:
-            chip_token = "m3"
-        elif "m4" in chip:
-            chip_token = "m4"
-        elif "intel" in chip or "core" in chip or "i5" in chip or "i7" in chip or "i9" in chip:
-            chip_token = "intel"
+        # Generic "Apple Silicon" mention with no specific chip name
+        if ("apple" in c and "silicon" in c) or "applesilicon" in c:
+            return "applesilicon"
 
-        parts = ["apple", line]
+        # Intel family detection
+        if any(tok in c for tok in ("intel", "core i3", "core i5", "core i7", "core i9", "xeon", "core-")):
+            return "intel"
 
-        if chip_token:
-            parts.append(chip_token)
+        return ""
 
-        if ram_token:
-            parts.append(ram_token)
+    chip_family = _chip_family()
 
-        if storage_token:
-            parts.append(storage_token)
+    # --------------------------------------------------------------
+    # 1) MAC FAMILY (MacBook, iMac, Mac mini, Mac Pro, Mac Studio)
+    # --------------------------------------------------------------
+    mac_blob = family_blob
 
-        return "-".join(parts)
-
-    # ------------------------------------------------------------------ #
-    # APPLE WATCH
-    # ------------------------------------------------------------------ #
-    if _any_contains("watch"):
-        raw_series = _clean(attrs.get("Series") or "")
-        case_size = _clean(
-            attrs.get("Case Size")
-            or attrs.get("Case Size (mm)")
-            or attrs.get("case-size")
-            or attrs.get("Size")
-        )
-        size_num = _num(case_size)
-
-        connectivity_source = " ".join(
-            [
-                str(attrs.get("Connectivity") or ""),
-                str(attrs.get("Features") or ""),
-                str(attrs.get("Wireless Technology") or ""),
-            ]
-        ).lower()
-
-        connectivity = ""
-        if "cellular" in connectivity_source:
-            if "gps" in connectivity_source:
-                connectivity = "gps-cellular"
+    if any(tok in mac_blob for tok in ("macbook", "mac-mini", "macmini", "imac", "mac-pro", "macpro", "mac-studio", "macstudio")):
+        # MacBook
+        if "macbook" in mac_blob:
+            if "air" in mac_blob:
+                line = "apple-macbook-air"
+            elif "pro" in mac_blob:
+                line = "apple-macbook-pro"
             else:
-                connectivity = "cellular"
-        elif "gps" in connectivity_source:
-            connectivity = "gps"
+                line = "apple-macbook"
+        # iMac
+        elif "imac" in mac_blob:
+            line = "apple-imac"
+        # Mac mini
+        elif "mac-mini" in mac_blob or "macmini" in mac_blob:
+            line = "apple-mac-mini"
+        # Mac Pro
+        elif "mac-pro" in mac_blob or "macpro" in mac_blob:
+            line = "apple-mac-pro"
+        # Mac Studio
+        elif "mac-studio" in mac_blob or "macstudio" in mac_blob:
+            line = "apple-mac-studio"
+        else:
+            line = "apple-mac"
 
-        parts: list[str] = ["apple", "watch"]
+        parts = [line]
+        if chip_family:
+            parts.append(chip_family)
 
-        s = raw_series
+        base_key = "-".join(parts)
+        return _with_grade(base_key)
+
+    # --------------------------------------------------------------
+    # 2) IPHONE FAMILY (no storage, no RAM; SE gets gen/year)
+    # --------------------------------------------------------------
+    if "iphone" in family_blob:
+        # Try to canonicalise: iphone-13-pro-max, iphone-12-mini, iphone-se, etc.
+        def _iphone_line() -> str:
+            # family_blob is already hyphen-normalised
+            tokens = family_blob.split("-")
+            if "iphone" not in tokens and "iphone" not in model:
+                return "apple-iphone"
+
+            # Build from first 'iphone' onwards, keeping known tokens
+            allowed_suffix_tokens = {
+                "se", "plus", "pro", "max", "mini",
+                # digits: handled separately
+            }
+            out = ["iphone"]
+
+            seen_iphone = False
+            for t in tokens:
+                if t == "iphone":
+                    seen_iphone = True
+                    continue
+                if not seen_iphone:
+                    continue
+
+                # stop if we hit unrelated junk
+                if not t:
+                    break
+
+                # digit = model number: 7, 8, 11, 12, 13, 14, 15, 16, 17...
+                if t.isdigit():
+                    out.append(t)
+                    continue
+
+                if t in allowed_suffix_tokens:
+                    out.append(t)
+                    continue
+
+                # generation text like '3rd', '4th-generation' etc → skip
+                if any(x in t for x in ("gen", "generation", "3rd", "4th", "5th", "6th")):
+                    continue
+
+                # anything else likely not part of the marketing name
+                break
+
+            return "apple-" + "-".join(out)
+
+        base_key = _iphone_line()
+
+        # Special case: iPhone SE – append gen/year suffix if obvious
+        if base_key == "apple-iphone-se":
+            se_suffix = _extract_iphone_se_gen_suffix(attrs, title)
+            if se_suffix:
+                base_key += se_suffix
+
+        return _with_grade(base_key)
+
+    # --------------------------------------------------------------
+    # 3) IPAD FAMILY (now with optional generation)
+    # --------------------------------------------------------------
+    if "ipad" in family_blob:
+        # Distinguish major lines only
+        line = "apple-ipad"
+        if "ipad-air" in family_blob or ("air" in family_blob and "ipad" in family_blob):
+            line = "apple-ipad-air"
+        elif "ipad-mini" in family_blob or ("mini" in family_blob and "ipad" in family_blob):
+            line = "apple-ipad-mini"
+        elif "ipad-pro" in family_blob or ("pro" in family_blob and "ipad" in family_blob):
+            line = "apple-ipad-pro"
+
+        gen_token = _extract_ipad_gen_token(attrs, title)
+
+        parts = [line]
+        if gen_token:
+            parts.append(gen_token)
+
+        base_key = "-".join(parts)
+        return _with_grade(base_key)
+
+    # --------------------------------------------------------------
+    # 4) APPLE WATCH
+    # --------------------------------------------------------------
+    if "watch" in family_blob:
+        raw_series = _clean(attrs.get("Series") or "")
         series_token = ""
+        s = raw_series
+
+        # Normalise series / SE / Ultra
         if s:
             if s.isdigit():
                 series_token = f"series-{s}"
             elif "series" in s:
+                # assume something like series-7
                 series_token = s
-            elif s in ("se", "se-2nd-gen", "se-2nd-generation"):
-                series_token = "se"
             elif "ultra" in s:
                 series_token = "ultra"
+            elif "se" in s:
+                series_token = "se"
 
+        # If attrs don't give us a series, try to read from blob
+        if not series_token:
+            if "ultra" in family_blob:
+                series_token = "ultra"
+            elif "se" in family_blob:
+                series_token = "se"
+            else:
+                # Last resort: try to spot a simple digit after 'series'
+                # but if not found, just "series-unknown"
+                if "series-" in family_blob:
+                    # e.g. series-7, series-8:
+                    for part in family_blob.split("-"):
+                        if part.isdigit():
+                            series_token = f"series-{part}"
+                            break
+
+        parts = ["apple-watch"]
         if series_token:
             parts.append(series_token)
 
-        if size_num:
-            parts.append(f"{size_num}mm")
+        base_key = "-".join(parts)
+        return _with_grade(base_key)
 
-        if connectivity:
-            parts.append(connectivity)
-
-        return "-".join(parts)
-
-    # ------------------------------------------------------------------ #
-    # IPHONE
-    # ------------------------------------------------------------------ #
-    if _any_contains("iphone"):
-        if "iphone" in model:
-            line = model
-        elif "iphone" in family:
-            line = family
+    # --------------------------------------------------------------
+    # 5) AIRPODS
+    # --------------------------------------------------------------
+    if "airpods" in family_blob:
+        fb = family_blob
+        if "max" in fb:
+            base_key = "apple-airpods-max"
+        elif "pro" in fb:
+            base_key = "apple-airpods-pro"
         else:
-            line = product_line or model or family
+            base_key = "apple-airpods"
+        return _with_grade(base_key)
 
-        line = _strip_apple_prefix(line)
+    # --------------------------------------------------------------
+    # 6) AIRTAG
+    # --------------------------------------------------------------
+    if "airtag" in family_blob:
+        base_key = "apple-airtag"
+        return _with_grade(base_key)
 
-        parts: list[str] = ["apple", line]
-
-        if storage_token:
-            parts.append(storage_token)
-
-        return "-".join(parts)
-
-    # ------------------------------------------------------------------ #
-    # IPAD
-    # ------------------------------------------------------------------ #
-    if _any_contains("ipad"):
-        if "ipad" in model:
-            line = model
-        elif "ipad" in family:
-            line = family
+    # --------------------------------------------------------------
+    # 7) APPLE TV
+    # --------------------------------------------------------------
+    if "apple-tv" in family_blob or "appletv" in family_blob:
+        fb = family_blob
+        if "4k" in fb:
+            base_key = "apple-appletv-4k"
         else:
-            line = product_line or model or family
+            base_key = "apple-appletv"
+        return _with_grade(base_key)
 
-        line = _strip_apple_prefix(line)
-        gen = _clean(attrs.get("Generation") or attrs.get("generation"))
+    # --------------------------------------------------------------
+    # 8) HOMEPOD
+    # --------------------------------------------------------------
+    if "homepod" in family_blob:
+        if "mini" in family_blob:
+            base_key = "apple-homepod-mini"
+        else:
+            base_key = "apple-homepod"
+        return _with_grade(base_key)
 
-        parts: list[str] = ["apple", line]
-
-        if gen:
-            parts.append(gen)
-
-        if storage_token:
-            parts.append(storage_token)
-
-        return "-".join(parts)
-
-    # ------------------------------------------------------------------ #
-    # AIRPODS
-    # ------------------------------------------------------------------ #
-    if _any_contains("airpods"):
-        joined = "-".join([model, family, product_line])
-        if "pro" in joined:
-            return "apple-airpodspro"
-        return "apple-airpods"
-
-    # ------------------------------------------------------------------ #
-    # AIRTAG
-    # ------------------------------------------------------------------ #
-    if _any_contains("airtag"):
-        return "apple-airtag"
-
-    # ------------------------------------------------------------------ #
-    # APPLE TV
-    # ------------------------------------------------------------------ #
-    if _any_contains("apple-tv") or _any_contains("appletv"):
-        gen = _clean(attrs.get("Generation") or attrs.get("generation"))
-        parts = ["apple", "appletv"]
-        if gen:
-            parts.append(gen)
-        return "-".join(parts)
-
-    # ------------------------------------------------------------------ #
-    # HOMEPOD
-    # ------------------------------------------------------------------ #
-    if _any_contains("homepod"):
-        txt = "-".join([model, family, product_line])
-        if "mini" in txt:
-            return "apple-homepod-mini"
-        return "apple-homepod"
-
-
-    # ------------------------------------------------------------------ #
-    # FALLBACK
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------
+    # FALLBACK FOR APPLE
+    # --------------------------------------------------------------
     return "unknown"

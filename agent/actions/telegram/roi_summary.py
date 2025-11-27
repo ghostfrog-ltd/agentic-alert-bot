@@ -47,13 +47,16 @@ def build_roi_message(
     if op is not None:
         roi_pct = op.roi * 100.0
         time_left_str = _format_time_left_s(op.time_left_s)
+        model_key = op.model_key or "unknown"
 
         lines = [
             "🐸 ROI alert",
             f"{op.title}",
             "",
+            f"Model: {model_key} | comps n={op.comps_samples}",
             f"ROI: {roi_pct:.1f}% | Profit: £{op.profit:.2f}",
             f"Buy £{op.purchase_cost:.2f} → Sell £{op.comps_median:.2f}",
+            f"Costs: Fees £{op.fees:.2f} | Ship £{op.outbound_ship:.2f}",
             f"Ends in: {time_left_str}",
             f"{op.url}",
         ]
@@ -90,11 +93,15 @@ def build_roi_message(
     for idx, op in enumerate(top, start=1):
         roi_pct = op.roi * 100.0
         time_left_str = _format_time_left_s(op.time_left_s)
+        model_key = op.model_key or "unknown"
 
         lines.append(f"{idx}) {op.title}")
         lines.append(
-            f"   ROI: {roi_pct:.1f}% | Profit: £{op.profit:.2f} | "
+            f"   ROI {roi_pct:.1f}% | Profit £{op.profit:.2f} | "
             f"Buy £{op.purchase_cost:.2f} → Sell £{op.comps_median:.2f}"
+        )
+        lines.append(
+            f"   Model {model_key} | comps n={op.comps_samples}"
         )
         lines.append(f"   Ends in: {time_left_str}")
         lines.append(f"   {op.url}")

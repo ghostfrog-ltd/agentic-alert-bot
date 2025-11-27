@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Mapping, Any, Optional
 
+from infrastructure.utils.condition import _derive_condition_grade
+
 UNKNOWN_KEY = "unknown"
 
 
@@ -62,20 +64,88 @@ def _normalise_brand(raw: Any) -> str:
     return "".join(out)
 
 
+def _compress_model_tokens(tokens: list[str]) -> str:
+    """
+    Take cleaned model tokens and collapse them into a coarse "family" token.
+
+    Goal: hero13black bundle combo -> hero13
+          osmo action 4 adventure combo -> osmoaction4
+          x3 creator kit -> x3
+          a7 iii body -> a7iii
+
+    Strategy:
+      - Always keep the first token.
+      - Keep the next tokens until we hit a "stop word" like colour/bundle/edition,
+        or we already have enough info (name + number).
+      - Join chosen tokens together.
+    """
+    if not tokens:
+        return ""
+
+    STOP_TOKENS = {
+        # colours
+        "black", "white", "silver", "grey", "gray", "green", "blue", "red",
+        "yellow", "orange", "purple", "gold", "rose", "pink",
+        # bundle / packaging
+        "bundle", "combo", "kit", "set", "pack", "gift", "creator", "creatoredition",
+        "adventure", "adventureedition", "edition", "special", "limited",
+        # generic fluff
+        "camera", "cam", "actioncam", "hd", "uhd",
+        "4k", "5k", "6k", "8k", "1080p", "2k",
+        "body", "bodyonly",
+    }
+
+    out: list[str] = []
+    have_number = False
+
+    for tok in tokens:
+        if not out:
+            # always keep the first token
+            out.append(tok)
+            if tok.isdigit():
+                have_number = True
+            continue
+
+        # stop if token is obviously just colour/bundle/etc
+        if tok in STOP_TOKENS:
+            break
+
+        # digits → usually generation / model number, good to keep
+        if tok.isdigit():
+            out.append(tok)
+            have_number = True
+            continue
+
+        # if we already have a number and at least 2 tokens, we likely
+        # have enough to identify the family (e.g. osmo + 4)
+        if have_number and len(out) >= 2:
+            break
+
+        # keep a couple of name tokens max (e.g. "osmo action", "eos r5")
+        if len(out) >= 3:
+            break
+
+        out.append(tok)
+
+    return "".join(out)
+
+
 def _normalise_model(raw_model: Any, raw_brand: Any) -> str:
     """
     Normalise the Model into a compact, bucketable token.
 
-    Rules:
-    - Prefer Model (attrs["Model"])
-    - Strip worthless values ("does not apply", "as the description shows")
-    - Strip parentheses and their contents
-    - Replace slashes & hyphens with spaces, collapse multiple spaces
-    - Strip leading brand token if it repeats the Brand field
-      (e.g. Brand=GoPro, Model="GoPro HERO 13 Black" → "HERO 13 Black")
-    - Strip non-alphanumerics from tokens, lowercase everything
-    - Join tokens into a single identifier
-    - If result is empty → treat as missing
+    This is a more "compressed" version than before – we intentionally
+    throw away variants (colour, kit/bundle, edition) to reduce key count.
+
+    Steps:
+      - Start from attrs["Model"]
+      - Strip worthless values ("does not apply", "as the description shows")
+      - Strip parentheses and their contents
+      - Replace slashes & hyphens with spaces, collapse spaces
+      - Strip leading brand token if it repeats the Brand field
+      - Strip non-alphanumerics from tokens, lowercase everything
+      - Compress tokens into a short "family" via _compress_model_tokens()
+      - If result is empty → treat as missing
     """
     s = _clean(raw_model)
     if not s:
@@ -119,12 +189,9 @@ def _normalise_model(raw_model: Any, raw_brand: Any) -> str:
     if not tokens:
         return ""
 
-    # Examples:
-    #   ["hero", "13", "black"] -> "hero13black"
-    #   ["osmo", "action", "4"] -> "osmoaction4"
-    #   ["x3"] -> "x3"
-    model = "".join(tokens)
-    return model
+    # Collapse to a family-like core (hero13, osmoaction4, x3, a7iii, etc.)
+    model_core = _compress_model_tokens(tokens)
+    return model_core
 
 
 def camera_drone_model_key(
@@ -133,39 +200,40 @@ def camera_drone_model_key(
 ) -> Optional[str]:
     """
     Build a canonical model key for camera/drone-style listings
-    (e.g. source='ebay-actioncams', other camera/drone sources) using ONLY attrs.
+    (e.g. source='ebay-actioncams', other camera/drone sources).
 
-    Output format:
-        {brand}-{model}
+    NEW Output format (console-style):
+
+        {brand}-{family}_{grade}
 
     Examples:
-        Brand="GoPro", Model="GoPro HERO 13 Black"
-            -> "gopro-hero13black"
+        Brand="GoPro", Model="GoPro HERO 13 Black (Creator Edition)"
+            -> "gopro-hero13_B"
 
-        Brand="GoPro", Model="HERO8"
-            -> "gopro-hero8"
+        Brand="GoPro", Model="HERO8 Black"
+            -> "gopro-hero8_B"
 
-        Brand="DJI", Model="DJI Osmo Action 4 Adventure"
-            -> "dji-osmoaction4adventure"
+        Brand="DJI", Model="DJI Osmo Action 4 Adventure Combo"
+            -> "dji-osmoaction4_B"
 
-        Brand="Insta360", Model="Insta360 X3"
-            -> "insta360-x3"
-
-        Brand="AKASO", Model="Akaso Ek7000 Pro"
-            -> "akaso-ek7000pro"
+        Brand="Insta360", Model="Insta360 X3 Creator Kit"
+            -> "insta360-x3_B"
 
     Rules:
     - Uses attrs["Brand"] and attrs["Model"]
-    - Ignores `title` completely (kept only for call-site compatibility)
+    - Ignores `title` for model, but passes it to _derive_condition_grade
     - If no usable Brand or Model → returns UNKNOWN_KEY ("unknown")
     """
     raw_brand = attrs.get("Brand")
     raw_model = attrs.get("Model")
 
     brand = _normalise_brand(raw_brand)
-    model = _normalise_model(raw_model, raw_brand)
+    model_core = _normalise_model(raw_model, raw_brand)
 
-    if not brand or not model:
+    if not brand or not model_core:
         return UNKNOWN_KEY
 
-    return f"{brand}-{model}"
+    base_key = f"{brand}-{model_core}"
+    grade = _derive_condition_grade(attrs, title)
+
+    return f"{base_key}_{grade}"

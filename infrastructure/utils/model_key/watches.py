@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Mapping, Any, Optional
 
+from infrastructure.utils.condition import _derive_condition_grade
+
 UNKNOWN_KEY = "unknown"
 
 
@@ -104,22 +106,33 @@ def _extract_model_core(
 
 def watch_model_key(
     attrs: Mapping[str, Any],
-    title: Optional[str] = None,  # kept for call-site compatibility, ignored
+    title: Optional[str] = None,  # kept for call-site compatibility
 ) -> str:
     """
-    Canonical key for watches (attrs-only, no title).
+    Canonical key for watches (attrs-only, no title for model).
 
     Priority:
       1) brand-ref         (when 'Reference Number' present)
       2) brand-modelcore   (fallback using Model / Watch Model)
 
-    Examples:
-      Brand="Seiko",  Reference="6222-8000"          -> "seiko-62228000"
-      Brand="Seiko",  Model="Seiko 5"               -> "seiko-5"
-      Brand="Casio",  Model="F-91W"                 -> "casio-f91w"
-      Brand="G-SHOCK", Model="Mudman GW-9500"       -> "gshock-gw9500"
+    New output style (console-style with grade):
+      brand-ref_<grade>
+      brand-modelcore_<grade>
 
-    If we can't classify, returns "unknown".
+    Examples:
+      Brand="Seiko", Reference="6222-8000"
+        -> "seiko-62228000_B"
+
+      Brand="Seiko", Model="Seiko 5"
+        -> "seiko-5_B"
+
+      Brand="Casio", Model="F-91W"
+        -> "casio-f91w_B"
+
+      Brand="G-SHOCK", Model="Mudman GW-9500"
+        -> "gshock-gw9500_A"
+
+    If we can't classify, returns "unknown" (no grade suffix).
     """
     attrs = attrs or {}
     brand = _clean_brand(attrs.get("Brand"))
@@ -129,11 +142,15 @@ def watch_model_key(
     # 1) Try reference number (most specific)
     ref = _extract_reference(attrs)
     if ref:
-        return f"{brand}-{ref}"
+        base_key = f"{brand}-{ref}"
+        grade = _derive_condition_grade(attrs, title or "")
+        return f"{base_key}_{grade}"
 
     # 2) Fall back to model
     model_core = _extract_model_core(attrs, brand)
     if model_core:
-        return f"{brand}-{model_core}"
+        base_key = f"{brand}-{model_core}"
+        grade = _derive_condition_grade(attrs, title or "")
+        return f"{base_key}_{grade}"
 
     return UNKNOWN_KEY

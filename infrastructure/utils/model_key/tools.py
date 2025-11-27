@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Mapping, Any, Optional
 
+from infrastructure.utils.condition import _derive_condition_grade
+
 UNKNOWN_KEY = "unknown"
 
 
@@ -191,31 +193,32 @@ def tools_model_key(
     """
     Build a canonical model key for power tools (source='ebay-tools') using ONLY attrs.
 
-    Desired output style:
-        {brand}-{model}
+    New output style (console-style with grade):
+        {brand}-{model}_{grade}
 
     Examples (given your attributes):
         Brand="DEWALT", Model="DEWALT DCF899N-XJ"
-            -> "dewalt-dcf899nxj"
+            -> "dewalt-dcf899nxj_B"
 
         Brand="DEWALT", Model="DCS565N"
-            -> "dewalt-dcs565n"
+            -> "dewalt-dcs565n_B"
 
         Brand="Makita", Model="DHS680Z"
-            -> "makita-dhs680z"
+            -> "makita-dhs680z_A"
 
         Brand="Bosch", Model="Bosch PSA 700 E"
-            -> "bosch-psa700e"
+            -> "bosch-psa700e_B"
 
         Brand="Terratek", Model="Terratek Rotary Multi Tool 150 pcs"
-            -> "terratek-rotarymultitool150pcs"
+            -> "terratek-rotarymultitool150pcs_B"
 
     Fallbacks:
         - If Model is missing/garbage, use MPN.
         - If MPN is missing/garbage, use Type.
         - If Brand missing OR all candidates for model are missing/garbage → "unknown".
 
-    `title` is ignored; it's here purely for call-site compatibility.
+    `title` is ignored for model selection but passed into _derive_condition_grade
+    to keep grading consistent with other categories.
     """
     raw_brand = attrs.get("Brand")
     raw_model = attrs.get("Model")
@@ -240,4 +243,7 @@ def tools_model_key(
     if not model:
         return UNKNOWN_KEY
 
-    return f"{brand}-{model}"
+    base_key = f"{brand}-{model}"
+    grade = _derive_condition_grade(attrs, title)
+
+    return f"{base_key}_{grade}"

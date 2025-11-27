@@ -104,6 +104,106 @@ ACCESSORY_TITLE_KEYWORDS = (
     "grip",
 )
 
+# --------------------------------
+# Grade weightings (relative value)
+# --------------------------------
+# These are tunable! Just a first pass.
+GRADE_WEIGHTS: Dict[str, float] = {
+    "A": 1.00,   # like new
+    "B": 0.85,   # standard used
+    "C": 0.70,   # rough but working
+    "D": 0.50,   # faulty / spares
+    "b": 0.80,   # bikes Cat N baseline
+}
+
+
+def _split_model_key_grade(model_key: str) -> tuple[str, Optional[str]]:
+    """
+    Split model_key into (family, grade) where grade is the trailing segment
+    if it matches a known grade token.
+
+    Examples:
+      'ps4_A'                  -> ('ps4', 'A')
+      'apple-iphone-13pro_B'   -> ('apple-iphone-13pro', 'B')
+      'yamaha-mt07-689cc_b'    -> ('yamaha-mt07-689cc', 'b')
+      'gopro-hero11'           -> ('gopro-hero11', None)
+    """
+    if not model_key:
+        return "", None
+
+    s = str(model_key).strip()
+    if "_" not in s:
+        return s, None
+
+    base, suffix = s.rsplit("_", 1)
+    suffix = suffix.strip()
+    if suffix in GRADE_WEIGHTS:
+        return base, suffix
+
+    return s, None
+
+
+def _get_comp_with_grade_adjustment(
+    model_key: str,
+    comps_by_model: Dict[str, Dict[str, Any]],
+) -> tuple[Optional[Dict[str, Any]], Optional[float]]:
+    """
+    Fetch comps for model_key with grade-aware fallback.
+
+    Behaviour:
+      - Try exact model_key first.
+      - If no comps, and key looks like "<base>_<grade>", try other grades
+        for the same <base> (e.g. ps4_A -> try ps4_B, ps4_C, ...).
+      - When we borrow comps from a different grade, adjust the median price
+        using GRADE_WEIGHTS so that, e.g., using A comps for a B listing
+        scales down appropriately.
+
+    Returns (comp_row, adjusted_median) or (None, None) if nothing usable.
+    """
+    if not model_key:
+        return None, None
+
+    base, listing_grade = _split_model_key_grade(model_key)
+
+    # 1) Exact match for this key
+    comp = comps_by_model.get(model_key)
+    comp_key = model_key
+
+    # 2) Fallback: same base, different grade
+    if not comp and base:
+        # simple preference order; adjust if you want different priority
+        grade_search_order = ["A", "B", "C", "D", "b"]
+        for g in grade_search_order:
+            alt_key = f"{base}_{g}"
+            if alt_key == model_key:
+                continue
+            if alt_key in comps_by_model:
+                comp = comps_by_model[alt_key]
+                comp_key = alt_key
+                break
+
+    if not comp:
+        return None, None
+
+    median = float(comp.get("median_final_price") or 0.0)
+    if median <= 0.0:
+        return None, None
+
+    # Work out the grade of the comps we actually used
+    _, comp_grade = _split_model_key_grade(comp_key)
+
+    # If both listing + comp have grades, adjust median via weights
+    if (
+        listing_grade
+        and comp_grade
+        and listing_grade in GRADE_WEIGHTS
+        and comp_grade in GRADE_WEIGHTS
+    ):
+        factor = GRADE_WEIGHTS[listing_grade] / GRADE_WEIGHTS[comp_grade]
+        median *= factor
+
+    return comp, median
+
 
 def _is_investible_model_key(model_key: Optional[str]) -> bool:
     """
@@ -113,12 +213,15 @@ def _is_investible_model_key(model_key: Optional[str]) -> bool:
     """
     if not model_key:
         return False
+
     mk = str(model_key).strip()
     if not mk:
         return False
+
     # Hard block: UNKNOWN should never get comps/ROI
-    if mk.upper() == "unknown":
+    if mk.lower() == "unknown":
         return False
+
     return True
 
 
@@ -299,7 +402,15 @@ def _comps_lookup() -> Dict[str, Dict[str, Any]]:
     Returns latest comps per model_key from DB.
     """
     try:
-        return latest_comps_map()
+        m = latest_comps_map()
+        size = len(m)
+        sample_keys = ", ".join(list(m.keys())[:5])
+        logger.info(
+            "[roi_listings] _comps_lookup loaded %d model_keys (sample: %s)",
+            size,
+            sample_keys,
+        )
+        return m
     except Exception as e:
         logger.warning("[roi_listings] latest_comps_map() failed: %s", e)
         return {}
@@ -610,15 +721,23 @@ def _insert_marker(cur, external_id: str, marker: str) -> None:
 def _send_new_high_email(op: Opportunity, time_left_str: str) -> None:
     from infrastructure.utils.emailer import send_email  # local import
 
-    subject = f"🔥 NEW {op.roi * 100:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
+    roi_pct = op.roi * 100.0
+    subject = f"🔥 NEW {roi_pct:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]}"
+
     body = (
         f"{op.title}\n\n"
         f"Source: {op.source}\n"
         f"URL: {op.url}\n\n"
-        f"ROI: {op.roi * 100:.1f}%\n"
-        f"Profit: £{op.profit:.2f}\n"
-        f"Ends in: {time_left_str}\n"
+        f"Current price: £{op.purchase_cost:.2f}\n"
+        f"Median comps (resale): £{op.comps_median:.2f}\n"
+        f"Fees: £{op.fees:.2f} | Outbound ship: £{op.outbound_ship:.2f}\n"
+        f"Estimated profit: £{op.profit:.2f}\n"
+        f"ROI: {roi_pct:.1f}%\n"
+        f"Time left: {time_left_str}\n"
+        f"Model key: {op.model_key or '-'}\n"
+        f"Comps samples: {op.comps_samples}\n"
     )
+
     try:
         send_email(subject=subject, body=body, to_addr=TO_EMAIL, is_html=False)
         logger.info(
@@ -634,16 +753,30 @@ def _send_bucket_email(op: Opportunity, bucket: int, time_left_str: str) -> None
     from infrastructure.utils.emailer import send_email  # local import
 
     roi_pct = op.roi * 100.0
-    subject = f"📈 ROI milestone {roi_pct:.0f}% (£{op.profit:.0f}) – {op.title[:80]}"
+    # Bucket range explanation
+    bucket_min = bucket * BUCKET_STEP * 100.0
+    bucket_max = bucket_min + BUCKET_STEP * 100.0
+
+    subject = (
+        f"📈 ROI milestone {roi_pct:.0f}% (£{op.profit:.0f}) – {op.title[:80]}"
+    )
+
     body = (
         f"{op.title}\n\n"
-        f"Bucket: {bucket} (step {BUCKET_STEP * 100:.0f}%)\n"
+        f"Bucket: {bucket} "
+        f"(covers roughly {bucket_min:.0f}%–{bucket_max:.0f}% ROI steps of {BUCKET_STEP*100:.0f}%)\n"
         f"Source: {op.source}\n"
         f"URL: {op.url}\n\n"
+        f"Current price: £{op.purchase_cost:.2f}\n"
+        f"Median comps (resale): £{op.comps_median:.2f}\n"
+        f"Fees: £{op.fees:.2f} | Outbound ship: £{op.outbound_ship:.2f}\n"
+        f"Estimated profit: £{op.profit:.2f}\n"
         f"ROI: {roi_pct:.1f}%\n"
-        f"Profit: £{op.profit:.2f}\n"
-        f"Ends in: {time_left_str}\n"
+        f"Time left: {time_left_str}\n"
+        f"Model key: {op.model_key or '-'}\n"
+        f"Comps samples: {op.comps_samples}\n"
     )
+
     try:
         send_email(subject=subject, body=body, to_addr=TO_EMAIL, is_html=False)
         logger.info(
@@ -670,13 +803,21 @@ def _send_siren_email(op: Opportunity, time_left_str: str) -> None:
         f"🚨 {roi_pct:.0f}% ROI (£{op.profit:.0f}) – {op.title[:80]} – "
         f"ends in {time_left_str} – BID NOW"
     )
+
     body = (
         f"{op.title}\n\n"
+        f"Source: {op.source}\n"
+        f"URL: {op.url}\n\n"
+        f"Current price: £{op.purchase_cost:.2f}\n"
+        f"Median comps (resale): £{op.comps_median:.2f}\n"
+        f"Fees: £{op.fees:.2f} | Outbound ship: £{op.outbound_ship:.2f}\n"
+        f"Estimated profit: £{op.profit:.2f}\n"
         f"ROI: {roi_pct:.1f}%\n"
-        f"Profit: £{op.profit:.2f}\n"
-        f"Ends in: {time_left_str}\n"
-        f"URL: {op.url}\n"
+        f"Time left: {time_left_str}\n"
+        f"Model key: {op.model_key or '-'}\n"
+        f"Comps samples: {op.comps_samples}\n"
     )
+
     try:
         send_email(subject=subject, body=body, to_addr=TO_EMAIL, is_html=False)
         logger.info(
@@ -684,6 +825,7 @@ def _send_siren_email(op: Opportunity, time_left_str: str) -> None:
         )
     except Exception as e:
         logger.warning("[roi_listings][siren] email failed: %s", e)
+
 
 
 def _process_roi_alerts(opps: List[Opportunity]) -> None:
@@ -819,11 +961,10 @@ def _build_all_opps_for_roi(
         if not _is_investible_model_key(model_key):
             continue
 
-        comp = comps_by_model.get(model_key)
-        if not comp:
+        comp, comps_median = _get_comp_with_grade_adjustment(model_key, comps_by_model)
+        if not comp or comps_median is None:
             continue
 
-        comps_median = float(comp.get("median_final_price") or 0.0)
         comps_samples = int(comp.get("samples") or 0)
 
         # require at least some comp quality
@@ -869,10 +1010,20 @@ def _shortlist(
     """
     Same as _build_all_opps_for_roi, but applies MIN_PROFIT_GBP / MIN_ROI
     gates to decide "real opportunities" for alerts/email.
+    Also logs how many listings get filtered at each step.
     """
     out: List[Opportunity] = []
 
+    # Debug counters
+    total = 0
+    investible = 0
+    with_comps = 0
+    with_enough_samples = 0
+    passed_thresholds = 0
+
     for li in listings:
+        total += 1
+
         source = li.get("source") or ""
         external_id = li.get("external_id") or ""
         title = li.get("title") or ""
@@ -882,20 +1033,25 @@ def _shortlist(
         end_time = li.get("end_time")
         time_left_s = li.get("time_left_s")
 
-        # Must have a usable, non-UNKNOWN model_key
+        # 1) Must have a usable, non-UNKNOWN model_key
         if not _is_investible_model_key(model_key):
             continue
+        investible += 1
 
-        comp = comps_by_model.get(model_key)
-        if not comp:
+        # 2) Need comps (with grade-aware fallback)
+        comp, comps_median = _get_comp_with_grade_adjustment(model_key, comps_by_model)
+        if not comp or comps_median is None:
             continue
+        with_comps += 1
 
-        comps_median = float(comp.get("median_final_price") or 0.0)
         comps_samples = int(comp.get("samples") or 0)
 
+        # 3) require at least some comp quality
         if comps_samples < 3 or comps_median <= 0.0:
             continue
+        with_enough_samples += 1
 
+        # 4) Calculate ROI / profit with per-source settings
         min_profit, min_roi, outbound_ship, fee_rate = _source_cfg(source)
 
         fees, profit, roi = _estimate_profit(
@@ -906,7 +1062,9 @@ def _shortlist(
             inbound_ship=INBOUND_SHIP_DEFAULT_GBP,
         )
 
+        # 5) Apply gates
         if profit >= min_profit and roi >= min_roi:
+            passed_thresholds += 1
             out.append(
                 Opportunity(
                     source=source,
@@ -927,7 +1085,19 @@ def _shortlist(
             )
 
     out.sort(key=lambda o: (o.profit, o.roi), reverse=True)
+
+    logger.info(
+        "[roi_listings] shortlist filter counts: "
+        "total=%d, investible=%d, with_comps=%d, with_enough_samples=%d, passed_thresholds=%d",
+        total,
+        investible,
+        with_comps,
+        with_enough_samples,
+        passed_thresholds,
+    )
+
     return out
+
 
 
 def get_alert_last_sent(name: str) -> Optional[datetime]:

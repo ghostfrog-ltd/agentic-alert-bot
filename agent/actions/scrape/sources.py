@@ -12,6 +12,14 @@ from infrastructure.scraper.adapters.niche.ebay.watches import Adapter as WatchA
 from infrastructure.scraper.adapters.niche.ebay.apple import Adapter as AppleAdapter
 from infrastructure.scraper.adapters.niche.ebay.tools import Adapter as ToolAdapter
 
+from infrastructure.scraper.adapters.niche.ebay.motors import Adapter as MotorsAdapter
+from infrastructure.scraper.adapters.niche.ebay.lego import Adapter as LegoAdapter
+from infrastructure.scraper.adapters.niche.ebay.pokemon import Adapter as PokemonAdapter
+from infrastructure.scraper.adapters.niche.ebay.samsung import Adapter as SamsungAdapter
+from infrastructure.scraper.adapters.niche.ebay.headphones import Adapter as HeadphonesAdapter
+
+from infrastructure.scraper.adapters.niche.ebay.hondaNc750 import Adapter as nc750Adapter
+
 logger = get_logger(__name__)
 
 # ----------------------------------------------------------------------
@@ -81,13 +89,22 @@ def run(*, ebay_token: str):
     logger.info("[scrape] Begin scrape (API mode)")
 
     adapters = [
-        AppleAdapter(),
         MotoMineAdapter(),
+
+        AppleAdapter(),
         ConsolesAdapter(),
         RetroPcAdapter(),
         ActionCamAdapter(),
         WatchAdapter(),
         ToolAdapter(),
+
+        MotorsAdapter(),
+        LegoAdapter(),
+        PokemonAdapter(),
+        SamsungAdapter(),
+        HeadphonesAdapter(),
+
+        nc750Adapter(),
     ]
 
     for adapter in adapters:
